@@ -36,6 +36,11 @@ object Config {
     /** Walk speed on the image plane, metres/second. */
     const val MOVE_SPEED_MPS = 0.1f
 
-    /** Max distance from the image centre the dragon can walk to, in metres. */
-    const val CLAMP_RADIUS_M = 0.3f
+    /**
+     * Max distance from the image centre (m). The brief asked for 0.3 m, but on a
+     * 0.15 m card that let the dragon hover two card-widths past the edge —
+     * reported on-device as "the dragon vanishes". 0.08 keeps its centre on the
+     * card while still allowing visible travel.
+     */
+    const val CLAMP_RADIUS_M = 0.08f
 }

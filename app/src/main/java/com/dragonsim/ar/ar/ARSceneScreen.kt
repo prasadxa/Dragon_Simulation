@@ -19,7 +19,6 @@ import com.dragonsim.ar.R
 import com.google.ar.core.AugmentedImage
 import com.google.ar.core.AugmentedImage.TrackingMethod
 import com.google.ar.core.AugmentedImageDatabase
-import com.google.ar.core.TrackingState
 import io.github.sceneview.ar.ARSceneView
 import io.github.sceneview.ar.ARSessionFailure
 import io.github.sceneview.math.Position
@@ -122,7 +121,13 @@ fun ARSceneScreen(
                     detectedImages = detectedImages + fresh
                 }
             }
-            onTrackingChanged(pickTargetImage(detectedImages)?.trackingState == TrackingState.TRACKING)
+            // "Is the image actually being observed right now?" — ARCore keeps an
+            // AugmentedImage at trackingState=TRACKING via LAST_KNOWN_POSE long
+            // after it leaves the FOV, so gating on trackingState alone would
+            // never show "image lost" and would never re-arm the spawn latch.
+            onTrackingChanged(
+                pickTargetImage(detectedImages)?.trackingMethod == TrackingMethod.FULL_TRACKING,
+            )
         },
         onTrackingFailureChanged = { reason -> Log.d(TAG, "tracking failure changed: $reason") },
     ) {
