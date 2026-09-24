@@ -24,6 +24,7 @@ import io.github.sceneview.ar.ARSessionFailure
 import io.github.sceneview.math.Position
 import io.github.sceneview.math.Rotation
 import io.github.sceneview.rememberEngine
+import kotlin.math.hypot
 import io.github.sceneview.rememberModelInstance
 import io.github.sceneview.rememberModelLoader
 
@@ -148,17 +149,31 @@ fun ARSceneScreen(
                     visibleTrackingMethods = setOf(TrackingMethod.FULL_TRACKING),
                 ) {
                     modelInstance?.let { instance ->
+                        // 0..1 fraction of top speed — drives flap rate and pitch.
+                        val speedNorm = (
+                            hypot(pose.velX, pose.velZ) / Config.MOVE_SPEED_MPS
+                            ).coerceIn(0f, 1f)
                         ModelNode(
                             modelInstance = instance,
                             autoAnimate = false,
-                            // Reactive: switching the value switches the clip.
-                            animationName = if (isMoving) walkClip else idleClip,
+                            // A model with a real walk/run clip switches clips on
+                            // movement. A flying creature has none — keep its idle
+                            // clip and flap faster instead of hard-cutting to an
+                            // incompatible pose (that cut reads as a size pop).
+                            animationName = walkClip?.let { if (isMoving) it else idleClip }
+                                ?: idleClip,
+                            animationSpeed = if (walkClip == null) 0.9f + speedNorm * 1.2f else 1f,
                             animationLoop = true,
                             scaleToUnits = Config.DRAGON_SCALE_UNITS,
                             // Bottom-align the bounding box so the dragon stands on the image.
                             centerOrigin = Position(0f, -1f, 0f),
                             position = Position(pose.x, Config.DRAGON_Y_OFFSET, pose.z),
-                            rotation = Rotation(0f, pose.yawDeg + Config.MODEL_YAW_OFFSET_DEG, 0f),
+                            // Euler: pitch dips toward travel, yaw faces it, roll banks turns.
+                            rotation = Rotation(
+                                pose.pitchDeg,
+                                pose.yawDeg + Config.MODEL_YAW_OFFSET_DEG,
+                                pose.rollDeg,
+                            ),
                         )
                     }
                 }

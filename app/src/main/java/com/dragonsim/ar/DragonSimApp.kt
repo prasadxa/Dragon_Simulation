@@ -27,6 +27,7 @@ import com.dragonsim.ar.ar.DragonPose
 import com.dragonsim.ar.ui.Joystick
 import com.dragonsim.ar.ui.OverlayState
 import com.dragonsim.ar.ui.StatusOverlay
+import kotlin.math.hypot
 
 /** App entry composable: theme + root. */
 @Composable
@@ -78,7 +79,8 @@ fun AppRoot(modifier: Modifier = Modifier) {
         }
     }
 
-    // Per-frame motion integration while the dragon exists.
+    // Per-frame motion integration while the dragon exists. step() runs even
+    // with no input so velocity/pitch/roll can ease back to rest (glide-out).
     LaunchedEffect(spawned) {
         if (!spawned) return@LaunchedEffect
         var lastNanos = -1L
@@ -86,7 +88,7 @@ fun AppRoot(modifier: Modifier = Modifier) {
             withFrameNanos { now ->
                 val dt = if (lastNanos < 0L) 0f else (now - lastNanos) / 1_000_000_000f
                 lastNanos = now
-                if (dt > 0f && DragonMotion.isMoving(joystick)) {
+                if (dt > 0f) {
                     pose = DragonMotion.step(
                         pose = pose,
                         input = joystick,
@@ -151,7 +153,9 @@ fun AppRoot(modifier: Modifier = Modifier) {
         if (BuildConfig.DEBUG) {
             Text(
                 text = "$debugLine | spawned=$spawned arm=$spawnAllowed | " +
-                    "pose=(${fmt(pose.x)},${fmt(pose.z)}) yaw=${fmt(pose.yawDeg)} | " +
+                    "pose=(${fmt(pose.x)},${fmt(pose.z)}) yaw=${fmt(pose.yawDeg)} " +
+                    "p=${fmt(pose.pitchDeg)} r=${fmt(pose.rollDeg)} " +
+                    "v=${fmt(hypot(pose.velX, pose.velZ))} | " +
                     "joy=(${fmt(joystick.first)},${fmt(joystick.second)})",
                 color = Color(0xFF7CFC00),
                 style = MaterialTheme.typography.labelSmall,

@@ -64,14 +64,15 @@ class DragonMotionTest {
     }
 
     @Test
-    fun `pickClip falls back to other family then index 0`() {
+    fun `pickClip Walk returns null when no walk or run clip exists`() {
         assertEquals("RunFast", DragonMotion.pickClip(listOf("RunFast"), ClipKind.Idle))
-        assertEquals("rest", DragonMotion.pickClip(listOf("rest"), ClipKind.Walk))
+        assertNull(DragonMotion.pickClip(listOf("rest"), ClipKind.Walk))
     }
 
     @Test
-    fun `pickClip maps flying clips on the shipped dragon model`() {
-        // Actual clips in app/src/main/assets/models/dragon.glb.
+    fun `pickClip Walk is null on the shipped flying-dragon model`() {
+        // Actual clips in app/src/main/assets/models/dragon.glb — no walk/run,
+        // so the caller keeps Flying_Idle and modulates animation speed instead.
         val names = listOf(
             "CharacterArmature|Death",
             "CharacterArmature|Fast_Flying",
@@ -79,7 +80,56 @@ class DragonMotionTest {
             "CharacterArmature|Punch",
         )
         assertEquals("CharacterArmature|Flying_Idle", DragonMotion.pickClip(names, ClipKind.Idle))
-        assertEquals("CharacterArmature|Fast_Flying", DragonMotion.pickClip(names, ClipKind.Walk))
+        assertNull(DragonMotion.pickClip(names, ClipKind.Walk))
+    }
+
+    @Test
+    fun `released stick glides to a full stop`() {
+        var pose = DragonPose()
+        // Build up speed.
+        repeat(120) {
+            pose = DragonMotion.step(pose, 1f to 0f, dtSeconds = 1f / 60f, speedMps = 0.1f, maxRadius = 0.3f)
+        }
+        assertTrue(pose.velX > 0.05f)
+        // Release — velocity must decay to an exact rest, not freeze mid-flight.
+        repeat(120) {
+            pose = DragonMotion.step(pose, 0f to 0f, dtSeconds = 1f / 60f, speedMps = 0.1f, maxRadius = 0.3f)
+        }
+        assertEquals(0f, pose.velX, 1e-6f)
+        assertEquals(0f, pose.velZ, 1e-6f)
+        assertEquals(0f, pose.pitchDeg, 1e-6f)
+        assertEquals(0f, pose.rollDeg, 1e-6f)
+        // A parked dragon produces an equal pose — no per-frame recomposition churn.
+        assertEquals(pose, DragonMotion.step(pose, 0f to 0f, 1f / 60f, 0.1f, 0.3f))
+    }
+
+    @Test
+    fun `dragon banks while turning and levels out`() {
+        var pose = DragonPose()
+        // First get it flying straight so a direction change produces yaw rate.
+        repeat(240) {
+            pose = DragonMotion.step(pose, 1f to 0f, dtSeconds = 1f / 60f, speedMps = 0.1f, maxRadius = 0.3f)
+        }
+        // Snap the stick to the opposite-ish direction — peak bank mid-turn.
+        var peakRoll = 0f
+        repeat(60) {
+            pose = DragonMotion.step(pose, -1f to 0f, dtSeconds = 1f / 60f, speedMps = 0.1f, maxRadius = 0.3f)
+            peakRoll = maxOf(peakRoll, abs(pose.rollDeg))
+        }
+        assertTrue("peakRoll=$peakRoll", peakRoll > 1f)
+        assertTrue("peakRoll=$peakRoll", peakRoll <= 22f)
+    }
+
+    @Test
+    fun `pitch dips with speed and never exceeds limit`() {
+        var pose = DragonPose()
+        var peakPitch = 0f
+        repeat(240) {
+            pose = DragonMotion.step(pose, 1f to 0f, dtSeconds = 1f / 60f, speedMps = 0.1f, maxRadius = 0.3f)
+            peakPitch = maxOf(peakPitch, abs(pose.pitchDeg))
+        }
+        assertTrue("peakPitch=$peakPitch", peakPitch > 1f)
+        assertTrue("peakPitch=$peakPitch", peakPitch <= 10f)
     }
 
     @Test

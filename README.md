@@ -1,11 +1,11 @@
 # Dragon Simulation
 
 ARCore image-tracking demo. Point the camera at the printed target image and an
-animated dragon spawns standing on it. An on-screen joystick (bottom-left) walks
-the dragon around on the image plane — it faces its movement direction and plays
-its **Walk** clip while moving, **Idle** while still. A Reset button (bottom-right)
-despawns it; non-ARCore devices get a readable error screen instead of a black
-view.
+animated dragon spawns hovering on it. An on-screen joystick (bottom-left) flies
+the dragon around on the image plane — it glides up to speed, banks into turns,
+dips its nose while moving, and flaps faster the harder you push. A Reset button
+(bottom-right) despawns it; non-ARCore devices get a readable error screen
+instead of a black view.
 
 ## Versions
 
@@ -75,7 +75,7 @@ host where virtualscene still maps to camera 0.
 | Asset | Path | Notes |
 |---|---|---|
 | Target image | `app/src/main/assets/images/target.png` | Any PNG/JPG works; textured, high-contrast images track best. Physical width is set in code — `Config.TARGET_IMAGE_WIDTH_M` (`0.15f` metres) in `app/src/main/java/com/dragonsim/ar/Config.kt`. The name registered in the ARCore database is `Config.TARGET_IMAGE_NAME` (`"target"`). Print the image so its real-world width matches, or tracking will be jittery. |
-| Dragon model | `app/src/main/assets/models/dragon.glb` | Any animated GLB. Clip names are resolved at runtime by `DragonMotion.pickClip` — case-insensitive, prefers names containing `"idle"` / `"walk"`/`"run"`/`"fly"`/`"move"`, falls back to index 0. Resolved names are logged via `Log.d("ARSceneScreen", …)`. The bundled model ships `CharacterArmature|Flying_Idle`, `CharacterArmature|Fast_Flying`, `Death`, `Headbutt`, `HitReact`, `No`, `Punch`, `Yes` — so it resolves Idle → `Flying_Idle`, Walk → `Fast_Flying`. |
+| Dragon model | `app/src/main/assets/models/dragon.glb` | Any animated GLB. Clip names are resolved at runtime by `DragonMotion.pickClip` — case-insensitive. Idle prefers `"idle"`, else index 0; Walk matches only `"walk"`/`"run"` — when no walk clip exists (flying creatures), the model keeps its idle clip and `animationSpeed` scales with joystick speed instead of hard-cutting poses. The bundled model ships `CharacterArmature|Flying_Idle`, `Fast_Flying`, `Death`, `Headbutt`, `HitReact`, `No`, `Punch`, `Yes`. |
 
 ## Tuning constants
 
@@ -87,7 +87,7 @@ All gameplay numbers live in `app/src/main/java/com/dragonsim/ar/Config.kt`:
 | `DRAGON_SCALE_UNITS` | `0.1f` | Dragon's bounding box fit into this cube (m). |
 | `DRAGON_Y_OFFSET` | `0f` | Extra lift along the image normal if the pivot isn't at the feet. |
 | `MODEL_YAW_OFFSET_DEG` | `0f` | Additive yaw fix if the model's authored forward isn't +Z. |
-| `MOVE_SPEED_MPS` | `0.1f` | Walk speed on the image plane (m/s). |
+| `MOVE_SPEED_MPS` | `0.1f` | Top flight speed on the image plane (m/s). |
 | `CLAMP_RADIUS_M` | `0.08f` | Max distance from the image centre (m). Was 0.3 per the original brief, but that let the dragon hover two card-widths past a 0.15 m card's edge — reported on-device as "vanishing". 0.08 keeps its centre on the card. |
 
 The dragon is bottom-aligned to the image plane via
@@ -109,7 +109,23 @@ ui/StatusOverlay.kt     status chip + Reset button + full-screen error state
 ```
 
 Movement mapping: joystick up (screen `-y`) → image-local `-z` ("up" the printed
-image, since +Z runs top→bottom). Yaw = `atan2(dx, dz)`, exponentially smoothed.
+image, since +Z runs top→bottom).
+
+Flight model (`DragonMotion.step`, all exponential, dt-based):
+
+- **Velocity** eases toward `stick × MOVE_SPEED_MPS` (~0.1 s constant) — the
+  dragon glides in/out instead of popping between still and full speed.
+- **Yaw** eases toward `atan2(dx, dz)` while input is held — a flyer keeps its
+  heading during a glide-out.
+- **Roll** banks into turns proportional to yaw rate (max ±22°), **pitch** dips
+  ~10° at full speed; both ease back to level when the dragon stops.
+- **Clamp**: position is capped inside `CLAMP_RADIUS_M` and velocity is
+  recomputed from actual displacement, so it doesn't push at the boundary.
+- **Wings**: the bundled dragon is a flyer with no walk clip, so `Flying_Idle`
+  plays continuously and `animationSpeed` scales 0.9→2.1× with speed — a
+  hard cut to `Fast_Flying` was what made the dragon appear to "change size"
+  (the two clips' torso poses differ by ~0.66 model units). Drop in a GLB with
+  a real `walk`/`run` clip and it switches clips on movement automatically.
 
 Tracking semantics: the dragon renders only while `trackingMethod ==
 FULL_TRACKING` (the image is actually in view). ARCore keeps an
@@ -124,8 +140,8 @@ latter is what made "image lost" never appear and reset look broken.
 2. **Spawn** — point at the printed `target.png`: exactly one dragon appears standing on it.
 3. **Anchoring** — move/tilt the phone: the dragon stays glued to the image.
 4. **Hide/show** — move the camera off the image (dragon hides via `FULL_TRACKING` visibility), back on (dragon reappears). Status shows "Image lost — point back at it" while the image isn't tracked.
-5. **Joystick** — push it: dragon walks in that direction, faces its travel direction, plays Walk; release: dragon stops, plays Idle.
-6. **Clamp** — hold the stick fully one direction: dragon stops at the 0.3 m radius and never leaves the image area.
+5. **Joystick** — push it: dragon glides in that direction, turns to face its travel direction, banks into the turn, flaps faster; release: it glides to a stop and levels out. Its size never changes — the same clip plays throughout.
+6. **Clamp** — hold the stick fully one direction: dragon stops at the 0.08 m radius and stays over the 0.15 m card.
 7. **Reset** — tap Reset: dragon despawns, status returns to "Point your camera at the image". Still pointing at the image → no re-spawn; move away and back → dragon respawns.
 8. **Unsupported device** — run on a non-ARCore device/emulator: full-screen message ("This device doesn't support ARCore" / "AR failed to start: …"), never a black screen.
 
@@ -142,10 +158,16 @@ debug APK installed over `adb`, `target.png` shown on a Mac screen):
   build renders the **opaque error screen** ("AR failed to start:
   FatalException") instead of a black view — the Unsupported path works.
 
-Still worth confirming by hand while holding the device (the phone moved
-during remote verification, so these are code- + unit-test-verified only):
+- A live joystick drag was observed via the debug HUD: pose integrated to
+  (0.03, 0.00) m, yaw eased to -106°, roll banked to +14.7°, pitch dipped, and
+  velocity/pitch/roll all settled to exact zero on release — glide-in/out,
+  banking, and the no-size-change animation path confirmed on hardware.
+- "Image lost — point back at it" banner appears the moment `trackingMethod`
+  drops to `LAST_KNOWN_POSE`.
 
-- Joystick drag visibly moving the dragon / facing flip / Walk↔Idle switch.
+Still worth confirming by eye while holding the device:
+
+- The dragon's banking/pitch/flap-rate look right from a natural viewing angle.
 - Dragon hide/show on camera-away then camera-back transitions.
 - Reset → move-away → re-approach respawn latch.
 
