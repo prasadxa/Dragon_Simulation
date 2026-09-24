@@ -88,7 +88,7 @@ All gameplay numbers live in `app/src/main/java/com/dragonsim/ar/Config.kt`:
 | `DRAGON_Y_OFFSET` | `0f` | Extra lift along the image normal if the pivot isn't at the feet. |
 | `MODEL_YAW_OFFSET_DEG` | `0f` | Additive yaw fix if the model's authored forward isn't +Z. |
 | `MOVE_SPEED_MPS` | `0.1f` | Walk speed on the image plane (m/s). |
-| `CLAMP_RADIUS_M` | `0.3f` | Max distance from the image centre (m). |
+| `CLAMP_RADIUS_M` | `0.08f` | Max distance from the image centre (m). Was 0.3 per the original brief, but that let the dragon hover two card-widths past a 0.15 m card's edge — reported on-device as "vanishing". 0.08 keeps its centre on the card. |
 
 The dragon is bottom-aligned to the image plane via
 `ModelNode(centerOrigin = Position(0f, -1f, 0f))`, so `DRAGON_Y_OFFSET` normally
@@ -110,6 +110,13 @@ ui/StatusOverlay.kt     status chip + Reset button + full-screen error state
 
 Movement mapping: joystick up (screen `-y`) → image-local `-z` ("up" the printed
 image, since +Z runs top→bottom). Yaw = `atan2(dx, dz)`, exponentially smoothed.
+
+Tracking semantics: the dragon renders only while `trackingMethod ==
+FULL_TRACKING` (the image is actually in view). ARCore keeps an
+`AugmentedImage` at `trackingState == TRACKING` via `LAST_KNOWN_POSE` long
+after it leaves the frame, so the status text and the post-reset respawn
+latch are driven by `trackingMethod`, not `trackingState` — gating on the
+latter is what made "image lost" never appear and reset look broken.
 
 ## Manual device-test checklist
 
