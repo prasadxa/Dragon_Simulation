@@ -43,6 +43,33 @@ Unit tests (pure JVM, no device needed):
 ./gradlew testDebugUnitTest
 ```
 
+### Emulator testing
+
+The debug APK also registers a second reference image — `emulator_poster.png`,
+the poster baked into the Android emulator's ARCore virtual scene
+(`<sdk>/emulator/resources/poster.png`, ~2 m wall poster). It lives in
+`app/src/debug/assets/` so release builds don't ship it, and it's only added
+to the image database when `BuildConfig.DEBUG` is true.
+
+To exercise the spawn flow on an emulator: create an AVD from a
+**Google Play** system image (`google_apis_playstore`), set
+`hw.camera.back = virtualscene` (emulator ≤ 36.x) or `environment`
+(emulator 37.x) and `hw.camera.front = emulated` in its `config.ini`, boot,
+install the debug APK, then aim the virtual camera at the wall poster in the
+virtual scene.
+
+**Known limitation (verified 2025-09 on emulator 37.1.11, Apple Silicon):**
+on the arm64 API 34 Play Store image the scene camera registers as
+`device@1.0/internal/10`, while ARCore's emulator device profile asks for
+camera id `0` — `Session.resume()` then throws `FatalException`
+("Failed to create cameras using image subsystem … unknown device 0").
+This is google-ar/arcore-android-sdk#1647, still open. With
+`hw.camera.back = emulated` the session *does* create (camera 0 exists and
+the AugmentedImage detector runs) but ARCore's VIO aborts on the fake test
+pattern. Net: arm64 API-34 emulators can't run the full AR pipeline; use a
+physical device (what we verified on) or an x86/older-API image on an Intel
+host where virtualscene still maps to camera 0.
+
 ## Replacing assets
 
 | Asset | Path | Notes |
@@ -97,7 +124,25 @@ image, since +Z runs top→bottom). Yaw = `atan2(dx, dz)`, exponentially smoothe
 
 ## Assumptions & unverified
 
-- **Needs a physical ARCore device** — image tracking, clip switching, anchoring and the joystick feel cannot be exercised on an emulator or in unit tests. Everything below should be confirmed on-device:
+**Verified on a physical device** (iQOO I2202, Android 14, ARCore 1.56 —
+debug APK installed over `adb`, `target.png` shown on a Mac screen):
+
+- App launches, camera feed renders, status chip shows "Point your camera at
+  the image" while searching and hides while tracking.
+- The image is detected and **exactly one dragon spawns anchored to it**;
+  the joystick appears only after spawn; the Reset button is present.
+- On the API-34 emulator, where ARCore's camera HAL is unusable, the same
+  build renders the **opaque error screen** ("AR failed to start:
+  FatalException") instead of a black view — the Unsupported path works.
+
+Still worth confirming by hand while holding the device (the phone moved
+during remote verification, so these are code- + unit-test-verified only):
+
+- Joystick drag visibly moving the dragon / facing flip / Walk↔Idle switch.
+- Dragon hide/show on camera-away then camera-back transitions.
+- Reset → move-away → re-approach respawn latch.
+
+Everything else below remains assume-at-your-own-risk:
 - Clip names in `models/dragon.glb` are unknown until it loads — `pickClip` guesses from names and logs the resolved choice (`adb logcat -s ARSceneScreen`). If the GLB's forward axis isn't +Z, set `MODEL_YAW_OFFSET_DEG`.
 - `TrackingMethod` import is `com.google.ar.core.AugmentedImage.TrackingMethod` (nested enum) — verified against the SceneView source, which imports it the same way.
 - Session-failure routing uses `onSessionFailure` (`ARSessionFailure` sealed class); `DeviceNotCompatible`/`SessionUnsupported` map to the unsupported-device message and cover `UnavailableDeviceNotCompatibleException`.

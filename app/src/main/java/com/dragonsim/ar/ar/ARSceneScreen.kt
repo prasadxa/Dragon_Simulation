@@ -13,6 +13,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.dragonsim.ar.BuildConfig
 import com.dragonsim.ar.Config
 import com.dragonsim.ar.R
 import com.google.ar.core.AugmentedImage
@@ -86,9 +87,25 @@ fun ARSceneScreen(
         // Image tracking only — skip plane detection cost and plane dots.
         planeRenderer = false,
         sessionConfiguration = { session, config ->
-            targetBitmap?.let { bitmap ->
+            val bitmap = targetBitmap
+            if (bitmap == null) {
+                onSessionError("Missing or unreadable asset: ${Config.TARGET_IMAGE_ASSET}")
+            } else {
                 config.augmentedImageDatabase = AugmentedImageDatabase(session).also { db ->
                     db.addImage(Config.TARGET_IMAGE_NAME, bitmap, Config.TARGET_IMAGE_WIDTH_M)
+                    // Debug-only extra reference image: the poster baked into the
+                    // Android emulator's ARCore virtual scene (sdk/emulator/resources/
+                    // poster.png). Lets the spawn flow be exercised without a printed
+                    // image. Lives in src/debug/assets so release builds don't ship it.
+                    if (BuildConfig.DEBUG) {
+                        decodeAssetBitmap(context, Config.EMULATOR_POSTER_ASSET)?.let { poster ->
+                            db.addImage(
+                                Config.EMULATOR_POSTER_NAME,
+                                poster,
+                                Config.EMULATOR_POSTER_WIDTH_M,
+                            )
+                        }
+                    }
                 }
             }
         },
