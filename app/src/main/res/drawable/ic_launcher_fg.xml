@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple stylized dragon-wing glyph for the adaptive icon foreground. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFDD55"
+        android:pathData="M54,26 L66,40 L84,34 L74,52 L88,64 L68,66 L72,84 L54,72 L36,84 L40,66 L20,64 L34,52 L24,34 L42,40 Z" />
+    <path
+        android:fillColor="#C62828"
+        android:pathData="M54,44 L60,54 L54,68 L48,54 Z" />
+</vector>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Dragon Simulation</string>
+
+    <string name="status_searching">Point your camera at the image</string>
+    <string name="status_lost">Image lost — point back at it</string>
+    <string name="status_unsupported">This device doesn\'t support ARCore</string>
+    <string name="status_ar_failed">AR failed to start: %1$s</string>
+
+    <string name="action_reset">Reset</string>
+</resources>
