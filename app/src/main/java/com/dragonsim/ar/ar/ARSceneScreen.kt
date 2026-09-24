@@ -40,8 +40,9 @@ fun ARSceneScreen(
     spawned: Boolean,
     pose: DragonPose,
     isMoving: Boolean,
-    onTrackingChanged: (Boolean) -> Unit,
+    onTrackingChanged: (AugmentedImage?) -> Unit,
     onSessionError: (String) -> Unit,
+    onDebugHud: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -121,13 +122,18 @@ fun ARSceneScreen(
                     detectedImages = detectedImages + fresh
                 }
             }
+            val img = pickTargetImage(detectedImages)
             // "Is the image actually being observed right now?" — ARCore keeps an
             // AugmentedImage at trackingState=TRACKING via LAST_KNOWN_POSE long
-            // after it leaves the FOV, so gating on trackingState alone would
-            // never show "image lost" and would never re-arm the spawn latch.
-            onTrackingChanged(
-                pickTargetImage(detectedImages)?.trackingMethod == TrackingMethod.FULL_TRACKING,
-            )
+            // after it leaves the FOV, so callers gate on trackingMethod, not
+            // trackingState.
+            onTrackingChanged(img)
+            if (BuildConfig.DEBUG) {
+                onDebugHud(
+                    "img=${img?.name} m=${img?.trackingMethod} s=${img?.trackingState}" +
+                        " | model=${if (modelInstance != null) "ok" else "loading"}",
+                )
+            }
         },
         onTrackingFailureChanged = { reason -> Log.d(TAG, "tracking failure changed: $reason") },
     ) {

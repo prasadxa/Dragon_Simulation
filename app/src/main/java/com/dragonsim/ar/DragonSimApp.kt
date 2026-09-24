@@ -16,6 +16,11 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.Text
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.layout.statusBarsPadding
+import com.google.ar.core.AugmentedImage.TrackingMethod
+import com.dragonsim.ar.BuildConfig
 import com.dragonsim.ar.ar.ARSceneScreen
 import com.dragonsim.ar.ar.DragonMotion
 import com.dragonsim.ar.ar.DragonPose
@@ -57,6 +62,7 @@ fun AppRoot(modifier: Modifier = Modifier) {
 
     var pose by remember { mutableStateOf(DragonPose()) }
     var joystick by remember { mutableStateOf(0f to 0f) }
+    var debugLine by remember { mutableStateOf("") }
 
     // Spawn/latch logic — kept out of composition proper.
     LaunchedEffect(spawned, imageTracking, spawnAllowed) {
@@ -114,8 +120,11 @@ fun AppRoot(modifier: Modifier = Modifier) {
                 spawned = spawned,
                 pose = pose,
                 isMoving = DragonMotion.isMoving(joystick),
-                onTrackingChanged = { imageTracking = it },
+                onTrackingChanged = { img ->
+                    imageTracking = img?.trackingMethod == TrackingMethod.FULL_TRACKING
+                },
                 onSessionError = { errorMessage = it },
+                onDebugHud = { debugLine = it },
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -136,5 +145,23 @@ fun AppRoot(modifier: Modifier = Modifier) {
                     .padding(24.dp),
             )
         }
+
+        // Debug HUD — the whole live state machine in one line, so a single
+        // screenshot answers "what is the app doing". Debug builds only.
+        if (BuildConfig.DEBUG) {
+            Text(
+                text = "$debugLine | spawned=$spawned arm=$spawnAllowed | " +
+                    "pose=(${fmt(pose.x)},${fmt(pose.z)}) yaw=${fmt(pose.yawDeg)} | " +
+                    "joy=(${fmt(joystick.first)},${fmt(joystick.second)})",
+                color = Color(0xFF7CFC00),
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(4.dp),
+            )
+        }
     }
 }
+
+private fun fmt(f: Float) = "%.2f".format(f)
