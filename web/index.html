@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Dragon AR</title>
+<!--
+  WebXR build of Dragon AR, assembled from three.js's official examples (MIT):
+  webxr_ar_hittest (reticle + placement), webgl_animation_skinning_blending
+  (idle/walk/run weights) and the immersive-web hit-test-anchors sample (anchor
+  once, re-read its pose every frame, move the creature in anchor space).
+-->
+<style>
+  :root { --glass: rgba(0,0,0,.45); --accent: #ffb300; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+  html, body { margin: 0; height: 100%; background: #111; color: #fff; font: 15px system-ui, sans-serif; overflow: hidden; }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 24px; text-align: center; background: radial-gradient(circle at 50% 30%, #3a2a10, #111 70%); }
+  #start h1 { margin: 0; font-size: 34px; }
+  #start p { margin: 0; opacity: .8; max-width: 340px; }
+  button { font: inherit; color: #fff; border: 0; border-radius: 999px; background: var(--glass); padding: 10px 16px; }
+  #go { background: var(--accent); color: #000; font-weight: 700; font-size: 18px; padding: 14px 34px; }
+  #go:disabled { opacity: .4; }
+  #overlay { position: fixed; inset: 0; display: none; touch-action: none; }
+  #hint { position: absolute; top: max(16px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); background: var(--glass); padding: 8px 16px; border-radius: 999px; white-space: nowrap; font-weight: 600; }
+  #pick { position: absolute; top: calc(max(16px, env(safe-area-inset-top)) + 46px); left: 0; right: 0; display: flex; justify-content: center; gap: 8px; }
+  #pick button.on { background: var(--accent); color: #000; }
+  #stick { position: absolute; left: 24px; bottom: 40px; width: 140px; height: 140px; border-radius: 50%; background: var(--glass); border: 2px solid rgba(255,255,255,.35); }
+  #knob { position: absolute; left: 45px; top: 45px; width: 50px; height: 50px; border-radius: 50%; background: rgba(255,255,255,.85); }
+  #acts { position: absolute; right: 16px; bottom: 40px; display: grid; grid-template-columns: repeat(2, 64px); gap: 10px; }
+  #acts button { width: 64px; height: 64px; padding: 0; font-size: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  #acts button b { font-size: 22px; line-height: 1.1; }
+  #acts button.on { background: var(--accent); color: #000; }
+  .hidden { display: none !important; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="start">
+  <h1>🐉 Dragon AR</h1>
+  <p>Point your phone at the floor or a table. Move it slowly until the ring appears, then tap to place your dragon.</p>
+  <button id="go" disabled>Checking AR…</button>
+  <p id="why"></p>
+</div>
+
+<div id="overlay">
+  <div id="hint">Move your phone slowly to find a surface</div>
+  <div id="pick"></div>
+  <div id="stick" class="ui hidden"><div id="knob"></div></div>
+  <div id="acts" class="ui hidden">
+    <button id="jump"><b>⤴</b>Jump</button>
+    <button id="fly"><b>🪽</b>Fly</button>
+    <button id="bigger"><b>＋</b>Bigger</button>
+    <button id="smaller"><b>－</b>Smaller</button>
+    <button id="trick"><b>✨</b>Trick</button>
+    <button id="move"><b>📍</b>Re-place</button>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+// ── Creatures (clip names read from the GLBs) ──────────────────────────────
+const CREATURES = [
+  { name: 'Dark Dragon', file: 'models/dragon_dark.glb', height: 0.3,
+    idle: 'Idle', walk: 'Walk', fly: 'Fly',
+    tricks: ['Attack_1', 'Attack_2', 'Up', 'Down', 'skill02', 'Turn_Left', 'Turn_Right'] },
+  { name: 'Dragon', file: 'models/dragon_classic.glb', height: 0.22,
+    idle: 'Idle-loop', walk: 'Walk-loop', run: 'Run-loop', fly: 'Flying-loop', tricks: [] },
+  { name: 'Baby Dragon', file: 'models/dragon.glb', height: 0.2, hover: 0.12,
+    idle: 'CharacterArmature|Flying_Idle', walk: 'CharacterArmature|Fast_Flying', run: 'CharacterArmature|Fast_Flying',
+    tricks: ['CharacterArmature|Yes', 'CharacterArmature|No', 'CharacterArmature|Headbutt', 'CharacterArmature|Punch', 'CharacterArmature|HitReact'] },
+  { name: 'Fox', file: 'models/fox.glb', height: 0.18,
+    idle: 'Survey', walk: 'Walk', run: 'Run', tricks: [] },
+];
+const WALK_BODIES_PER_S = 0.9, RUN_BODIES_PER_S = 2.4, MAX_ROAM_M = 3, GRAVITY = 9.81, FLY_HEIGHT_BODIES = 2.5;
+
+// ── three.js scene ─────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setFramebufferScaleFactor(0.85);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 30);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x886644, 2.2));
+
+// Reticle: where a surface was found at the centre of the screen.
+const reticle = new THREE.Mesh(
+  new THREE.RingGeometry(0.06, 0.08, 40).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 }));
+reticle.matrixAutoUpdate = false;
+reticle.visible = false;
+scene.add(reticle);
+
+// Anchor group: its matrix is the ARCore anchor pose, re-read every frame and
+// never smoothed. Everything the creature does happens in this local space.
+const anchorGroup = new THREE.Group();
+anchorGroup.matrixAutoUpdate = false;
+anchorGroup.visible = false;
+scene.add(anchorGroup);
+
+const creatureRoot = new THREE.Group();
+anchorGroup.add(creatureRoot);
+
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(0.4, 1.5, 0.3);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -0.6, right: 0.6, top: 0.6, bottom: -0.6, near: 0.1, far: 4 });
+sun.shadow.bias = -0.0005;
+anchorGroup.add(sun, sun.target);
+
+// Transparent shadow catcher that follows the creature on the ground.
+const shadowCatcher = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.2, 1.2).rotateX(-Math.PI / 2),
+  new THREE.ShadowMaterial({ opacity: 0.35 }));
+shadowCatcher.receiveShadow = true;
+anchorGroup.add(shadowCatcher);
+
+// ── Creature model + animation ─────────────────────────────────────────────
+const loader = new GLTFLoader();
+let creatureIdx = 0, model = null, mixer = null, clips = {}, trickAction = null;
+let sizeK = 1;
+
+function loadCreature(i) {
+  creatureIdx = i;
+  const c = CREATURES[i];
+  [...$('pick').children].forEach((b, j) => b.classList.toggle('on', j === i));
+  loader.load(c.file, gltf => {
+    if (model) creatureRoot.remove(model);
+    model = gltf.scene;
+    model.traverse(o => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
+    // Normalise: c.height metres tall, feet at y=0, centred on x/z.
+    const box = new THREE.Box3().setFromObject(model);
+    const s = c.height / Math.max(box.max.y - box.min.y, 1e-6);
+    model.scale.setScalar(s);
+    const ctr = box.getCenter(new THREE.Vector3());
+    model.position.set(-ctr.x * s, -box.min.y * s, -ctr.z * s);
+    creatureRoot.add(model);
+
+    mixer = new THREE.AnimationMixer(model);
+    const get = n => { const clip = n && THREE.AnimationClip.findByName(gltf.animations, n); return clip ? mixer.clipAction(clip) : null; };
+    clips = { idle: get(c.idle), walk: get(c.walk), run: get(c.run), fly: get(c.fly), tricks: c.tricks.map(get).filter(Boolean) };
+    if (clips.walk === clips.run) clips.run = null;
+    for (const a of [clips.idle, clips.walk, clips.run, clips.fly]) if (a) { a.play(); a.setEffectiveWeight(0); }
+    clips.tricks.forEach(a => { a.setLoop(THREE.LoopOnce); a.clampWhenFinished = false; });
+    mixer.addEventListener('finished', e => { if (e.action === trickAction) { trickAction.fadeOut(0.25); trickAction = null; } });
+    trickAction = null;
+    $('fly').classList.toggle('hidden', !clips.fly);
+    $('trick').classList.toggle('hidden', clips.tricks.length === 0);
+    $('jump').classList.toggle('hidden', !!c.hover);
+    st.flying = false;
+  });
+}
+
+CREATURES.forEach((c, i) => {
+  const b = document.createElement('button');
+  b.textContent = c.name;
+  b.onclick = () => loadCreature(i);
+  $('pick').appendChild(b);
+});
+
+// ── Creature state (anchor-local metres) ───────────────────────────────────
+const st = { x: 0, y: 0, z: 0, vy: 0, yaw: 0, speed: 0, flying: false, ground: 0, target: null };
+
+// ── Joystick ───────────────────────────────────────────────────────────────
+const stick = { x: 0, y: 0, id: null };
+{
+  const el = $('stick'), knob = $('knob');
+  const R = 70;
+  const move = e => {
+    const r = el.getBoundingClientRect();
+    let dx = e.clientX - (r.left + R), dy = e.clientY - (r.top + R);
+    const d = Math.hypot(dx, dy);
+    if (d > R) { dx *= R / d; dy *= R / d; }
+    stick.x = dx / R; stick.y = dy / R;
+    knob.style.transform = `translate(${dx}px, ${dy}px)`;
+  };
+  el.addEventListener('pointerdown', e => { stick.id = e.pointerId; el.setPointerCapture(e.pointerId); move(e); });
+  el.addEventListener('pointermove', e => { if (e.pointerId === stick.id) move(e); });
+  const end = e => { if (e.pointerId !== stick.id) return; stick.id = null; stick.x = stick.y = 0; knob.style.transform = ''; };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+}
+// Touches on controls must not also count as an AR "select" (tap on the world).
+for (const el of document.querySelectorAll('#stick, #acts, #pick')) el.addEventListener('beforexrselect', e => e.preventDefault());
+
+$('jump').onclick = () => { if (!st.flying && st.y <= st.ground + 1e-3) st.vy = Math.sqrt(2 * GRAVITY * 0.8 * bodyH()); };
+$('fly').onclick = () => { st.flying = !st.flying; $('fly').classList.toggle('on', st.flying); };
+$('bigger').onclick = () => { sizeK = Math.min(sizeK * 1.25, 8); };
+$('smaller').onclick = () => { sizeK = Math.max(sizeK / 1.25, 0.4); };
+$('trick').onclick = () => {
+  if (!clips.tricks.length || trickAction) return;
+  trickAction = clips.tricks[Math.floor(Math.random() * clips.tricks.length)];
+  trickAction.reset().setEffectiveWeight(1).fadeIn(0.2).play();
+};
+$('move').onclick = () => { placeRequested = true; };
+
+// Pinch anywhere on the world to resize.
+{
+  const pts = new Map(); let pinch0 = 0, k0 = 1;
+  const ov = $('overlay');
+  ov.addEventListener('pointerdown', e => { if (e.target !== ov) return; pts.set(e.pointerId, e); if (pts.size === 2) { const [a, b] = pts.values(); pinch0 = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); k0 = sizeK; } });
+  ov.addEventListener('pointermove', e => { if (!pts.has(e.pointerId)) return; pts.set(e.pointerId, e); if (pts.size === 2 && pinch0 > 0) { const [a, b] = pts.values(); sizeK = THREE.MathUtils.clamp(k0 * Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) / pinch0, 0.4, 8); } });
+  const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch0 = 0; };
+  ov.addEventListener('pointerup', up); ov.addEventListener('pointercancel', up);
+}
+
+const bodyH = () => CREATURES[creatureIdx].height * sizeK;
+
+// ── WebXR session ──────────────────────────────────────────────────────────
+let hitSource = null, refSpace = null, lastHit = null, anchor = null, placeRequested = false, tapRequested = false;
+const anchorPos = new THREE.Vector3(), anchorQuat = new THREE.Quaternion(), anchorScl = new THREE.Vector3();
+
+async function checkSupport() {
+  const go = $('go');
+  if (!navigator.xr) { $('why').textContent = 'Open this page in Chrome on an ARCore phone.'; go.textContent = 'AR not available'; return; }
+  const ok = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
+  if (!ok) { $('why').textContent = 'This browser/phone does not support WebXR AR. Install "Google Play Services for AR" and use Chrome.'; go.textContent = 'AR not available'; return; }
+  go.disabled = false; go.textContent = 'Start AR';
+}
+checkSupport();
+
+$('go').onclick = async () => {
+  const session = await navigator.xr.requestSession('immersive-ar', {
+    requiredFeatures: ['hit-test'],
+    optionalFeatures: ['anchors', 'dom-overlay', 'plane-detection'],
+    domOverlay: { root: $('overlay') },
+  });
+  renderer.xr.setReferenceSpaceType('local');
+  await renderer.xr.setSession(session);
+  refSpace = renderer.xr.getReferenceSpace();
+  const viewer = await session.requestReferenceSpace('viewer');
+  hitSource = await session.requestHitTestSource({ space: viewer });
+  session.addEventListener('select', () => { tapRequested = true; });
+  session.addEventListener('end', () => location.reload());
+  $('start').classList.add('hidden');
+  $('overlay').style.display = 'block';
+  loadCreature(creatureIdx);
+};
+
+async function placeAt(hit, frame) {
+  anchor?.delete?.();
+  anchor = null;
+  if (hit.createAnchor) {
+    try { anchor = await hit.createAnchor(); } catch (e) { console.warn('anchor failed', e); }
+  }
+  if (!anchor) {
+    // No anchors support: pin the hit pose in the (world-locked) local space.
+    const pose = hit.getPose(refSpace);
+    anchorGroup.matrix.fromArray(pose.transform.matrix);
+  }
+  Object.assign(st, { x: 0, y: 0, z: 0, vy: 0, ground: 0, target: null });
+  const cam = renderer.xr.getCamera();
+  // Turn to face the phone.
+  anchorGroup.matrix.decompose(anchorPos, anchorQuat, anchorScl);
+  const toCam = new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld).applyMatrix4(new THREE.Matrix4().copy(anchorGroup.matrix).invert());
+  st.yaw = Math.atan2(toCam.x, toCam.z);
+  anchorGroup.visible = true;
+  spawnT = 0;
+  document.querySelectorAll('.ui').forEach(e => e.classList.remove('hidden'));
+  navigator.vibrate?.(30);
+}
+let spawnT = 1;
+
+// ── Surfaces from plane detection (optional feature) ───────────────────────
+const _m = new THREE.Matrix4(), _p = new THREE.Vector3();
+function surfaces(frame) {
+  const out = [];
+  if (!frame.detectedPlanes) return out;
+  frame.detectedPlanes.forEach(plane => {
+    if (plane.orientation !== 'horizontal') return;
+    const pose = frame.getPose(plane.planeSpace, refSpace);
+    if (!pose) return;
+    const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
+    out.push({ m, inv: m.clone().invert(), y: pose.transform.position.y, poly: plane.polygon });
+  });
+  return out;
+}
+function inPoly(poly, x, z) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if ((a.z > z) !== (b.z > z) && x < (b.x - a.x) * (z - a.z) / (b.z - a.z) + a.x) inside = !inside;
+  }
+  return inside;
+}
+// Highest detected surface under local (x,z) that is not above `maxY` (local).
+function groundUnder(surfs, x, z, maxY) {
+  if (!surfs.length) return null;
+  _p.set(x, 0, z).applyMatrix4(anchorGroup.matrix); // → world
+  let best = null;
+  for (const s of surfs) {
+    const q = _p.clone().applyMatrix4(s.inv);
+    if (!inPoly(s.poly, q.x, q.z)) continue;
+    const localY = s.y - anchorPos.y;
+    if (localY <= maxY + 0.03 && (best === null || localY > best)) best = localY;
+  }
+  return best;
+}
+
+// ── Frame loop ─────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+const fwd = new THREE.Vector3(), right = new THREE.Vector3(), dir = new THREE.Vector3(), invQ = new THREE.Quaternion();
+
+renderer.setAnimationLoop((t, frame) => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (!frame) { renderer.render(scene, camera); return; }
+
+  // Centre-screen surface hit → reticle.
+  const hits = hitSource ? frame.getHitTestResults(hitSource) : [];
+  lastHit = hits[0] ?? null;
+  if (lastHit) {
+    reticle.visible = !anchor || placeRequested;
+    reticle.matrix.fromArray(lastHit.getPose(refSpace).transform.matrix);
+  } else reticle.visible = false;
+
+  const viewerPose = frame.getViewerPose(refSpace);
+  if ((tapRequested || placeRequested) && lastHit && (!anchorGroup.visible || placeRequested) && viewerPose) {
+    placeRequested = false; tapRequested = false;
+    placeAt(lastHit, frame);
+  } else if (tapRequested && anchorGroup.visible && lastHit) {
+    // Tap with the creature placed: walk to the ring.
+    const p = new THREE.Vector3().setFromMatrixPosition(reticle.matrix).applyMatrix4(new THREE.Matrix4().copy(anchorGroup.matrix).invert());
+    st.target = { x: p.x, z: p.z };
+    tapRequested = false;
+  }
+  tapRequested = false;
+
+  // Anchor pose straight from ARCore — no smoothing, no re-anchoring.
+  if (anchor) {
+    const pose = frame.getPose(anchor.anchorSpace, refSpace);
+    if (pose) anchorGroup.matrix.fromArray(pose.transform.matrix);
+  }
+  anchorGroup.matrix.decompose(anchorPos, anchorQuat, anchorScl);
+
+  const hint = $('hint');
+  if (!viewerPose) hint.textContent = 'Tracking lost — move the phone slowly';
+  else if (!anchorGroup.visible) hint.textContent = lastHit ? 'Tap to place your creature' : 'Move your phone slowly to find a surface';
+  else if (placeRequested) hint.textContent = 'Point at a surface…';
+  else hint.textContent = CREATURES[creatureIdx].name;
+
+  if (anchorGroup.visible && model && viewerPose) stepCreature(frame, dt);
+  mixer?.update(dt);
+  renderer.render(scene, camera);
+});
+
+function stepCreature(frame, dt) {
+  const c = CREATURES[creatureIdx];
+  const h = bodyH();
+  spawnT = Math.min(1, spawnT + dt / 0.45);
+
+  // Joystick → camera-relative direction on the floor → anchor-local.
+  const cam = renderer.xr.getCamera();
+  cam.getWorldDirection(fwd); fwd.y = 0;
+  if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+  fwd.normalize();
+  right.set(-fwd.z, 0, fwd.x);
+  dir.set(0, 0, 0).addScaledVector(fwd, -stick.y).addScaledVector(right, stick.x);
+  invQ.copy(anchorQuat).invert();
+  dir.applyQuaternion(invQ); dir.y = 0;
+  let mag = Math.min(1, Math.hypot(stick.x, stick.y));
+
+  if (mag > 0.08) st.target = null;
+  else if (st.target) {
+    const dx = st.target.x - st.x, dz = st.target.z - st.z, d = Math.hypot(dx, dz);
+    if (d < 0.02) st.target = null; else { dir.set(dx, 0, dz); mag = Math.min(1, d / (h * 0.5) + 0.3) * 0.6; }
+  }
+  if (dir.lengthSq() > 1e-8) dir.normalize();
+
+  const speed = mag < 0.08 ? 0 : THREE.MathUtils.lerp(WALK_BODIES_PER_S, RUN_BODIES_PER_S, THREE.MathUtils.smoothstep(mag, 0.55, 1)) * h * mag;
+  st.speed = THREE.MathUtils.damp(st.speed, speed, 10, dt);
+
+  if (st.speed > 1e-4) {
+    const nx = st.x + dir.x * st.speed * dt, nz = st.z + dir.z * st.speed * dt;
+    // Stay on detected surfaces: step down off an edge onto a lower one, never through walls.
+    const surfs = surfaces(frame);
+    const here = groundUnder(surfs, st.x, st.z, st.ground);
+    const there = groundUnder(surfs, nx, nz, st.ground);
+    const inRange = Math.hypot(nx, nz) < MAX_ROAM_M;
+    let ok = inRange && (st.flying || there !== null || here === null);
+    if (ok && there !== null && !st.flying) st.ground = there;
+    if (ok) { st.x = nx; st.z = nz; }
+    const wantYaw = Math.atan2(dir.x, dir.z);
+    let dy = wantYaw - st.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+    st.yaw += dy * Math.min(1, dt * 8);
+  }
+
+  // Vertical: gravity, jump, flight.
+  const hover = c.hover ? c.hover * sizeK : 0;
+  if (st.flying) {
+    const flyH = st.ground + FLY_HEIGHT_BODIES * h;
+    st.y = THREE.MathUtils.damp(st.y, flyH, 2.5, dt); st.vy = 0;
+  } else {
+    const floor = st.ground + hover;
+    if (st.y > floor + 1e-3 || st.vy > 0) {
+      st.vy -= GRAVITY * dt; st.y += st.vy * dt;
+      if (st.y <= floor) { st.y = floor; st.vy = 0; navigator.vibrate?.(15); }
+    } else st.y = THREE.MathUtils.damp(st.y, floor, 12, dt);
+  }
+
+  // Transform (pop-in on spawn).
+  const u = spawnT - 1, pop = 1 + 2.70158 * u * u * u + 1.70158 * u * u;
+  creatureRoot.position.set(st.x, st.y, st.z);
+  creatureRoot.rotation.set(0, st.yaw, 0);
+  creatureRoot.scale.setScalar(sizeK * Math.max(pop, 0.01));
+  shadowCatcher.position.set(st.x, st.ground + 0.002, st.z);
+  sun.position.set(st.x + 0.4, st.ground + 1.5, st.z + 0.3);
+  sun.target.position.set(st.x, st.ground, st.z);
+  const sc = Math.max(0.6, h * 3);
+  Object.assign(sun.shadow.camera, { left: -sc, right: sc, top: sc, bottom: -sc });
+  sun.shadow.camera.updateProjectionMatrix();
+
+  // Animation weights: idle → walk → run by speed; fly overrides.
+  const s = st.speed / (RUN_BODIES_PER_S * h);
+  const loco = THREE.MathUtils.clamp(st.speed / (WALK_BODIES_PER_S * h), 0, 1);
+  const runW = clips.run ? THREE.MathUtils.clamp((s - 0.45) / 0.4, 0, 1) : 0;
+  let wIdle = 1 - loco, wWalk = loco * (1 - runW), wRun = loco * runW;
+  const flyW = st.flying && clips.fly ? 1 : 0;
+  st.flyW = THREE.MathUtils.damp(st.flyW ?? 0, flyW, 6, dt);
+  const k = 1 - st.flyW, tw = trickAction ? 0.15 : 1;
+  clips.idle?.setEffectiveWeight(wIdle * k * tw);
+  clips.walk?.setEffectiveWeight(wWalk * k * tw);
+  clips.run?.setEffectiveWeight(wRun * k * tw);
+  clips.fly?.setEffectiveWeight(st.flyW * tw);
+  if (clips.walk) clips.walk.timeScale = THREE.MathUtils.clamp(st.speed / (WALK_BODIES_PER_S * h), 0.6, 1.6);
+  if (clips.run) clips.run.timeScale = THREE.MathUtils.clamp(st.speed / (RUN_BODIES_PER_S * h), 0.7, 1.4);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

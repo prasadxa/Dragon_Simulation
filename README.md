@@ -1,11 +1,15 @@
 # Dragon Simulation
 
-ARCore image-tracking demo. Point the camera at the printed target image and an
-animated dragon spawns hovering on it. An on-screen joystick (bottom-left) flies
-the dragon around on the image plane — it glides up to speed, banks into turns,
-dips its nose while moving, and flaps faster the harder you push. A Reset button
-(bottom-right) despawns it; non-ARCore devices get a readable error screen
-instead of a black view.
+AR creature pet for Android. Scan the room, place a dragon on the floor or a
+table (or on the printed target image), fly it with the on-screen joystick, tap
+to send it walking, throw it a ball to fetch, make it jump, trigger trick
+animations, and take photos/video of it. A companion WebXR build (`web/`) runs
+the same experience in Chrome on ARCore phones — no install.
+
+Default creature is **Dark Dragon** — a realistic PBR-textured model (Tarisland
+dragon, CC-BY) with idle/walk/fly blending and 21 action clips. A cartoon
+Quaternius dragon, a classic walking dragon, and the Khronos Fox are also in the
+picker.
 
 ## Versions
 
@@ -16,16 +20,11 @@ instead of a black view.
 | JDK | 21 (`org.gradle.java.home` in `gradle.properties`) |
 | SceneView | `io.github.sceneview:arsceneview:4.39.0` (ARCore + Filament + Compose) |
 | Compose BOM | `androidx.compose:compose-bom:2026.09.00` |
-| activity-compose | 1.13.0 |
-| lifecycle-runtime-compose | 2.11.0 |
-| compileSdk | 37 (SceneView 4.39 / Compose 1.12 require ≥ 37 → AGP ≥ 9.1) |
-| targetSdk / minSdk | 36 / 26 |
+| compileSdk / targetSdk / minSdk | 37 / 36 / 26 |
 | ABI | arm64-v8a only |
 
-> Why these versions: SceneView 4.39.0 and the 2026.09 Compose BOM declare
-> compileSdk 37 and AGP ≥ 9.1 in their AAR metadata, and AGP 9.x needs
-> Gradle ≥ 9.6. If you ever downgrade SceneView, the older AGP 8.13 +
-> Gradle ≤ 9.5 combination also works.
+> SceneView 4.39.0 and the 2026.09 Compose BOM declare compileSdk 37 and
+> AGP ≥ 9.1 in their AAR metadata, and AGP 9.x needs Gradle ≥ 9.6.
 
 ## Build & install
 
@@ -37,45 +36,68 @@ echo "sdk.dir=$HOME/Library/Android/sdk" > local.properties   # if not auto-dete
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Unit tests (pure JVM, no device needed):
+Unit tests (pure JVM, no device needed — motion, physics, clip resolution):
 
 ```bash
-./gradlew testDebugUnitTest
+./gradlew testDebugUnitTest    # 23 tests
+./gradlew lintDebug            # lint report → app/build/reports/lint-results-debug.html
+```
+
+Debug hooks (debug builds only):
+
+```bash
+# ARCore record/replay — test without moving the phone:
+adb shell am start -n com.dragonsim.ar/.MainActivity --ez record true    # writes files/session.mp4
+adb shell am start -n com.dragonsim.ar/.MainActivity --ez playback true  # replays it
+adb logcat -s ARSceneScreen CreatureSim
 ```
 
 ### Emulator testing
 
-The debug APK also registers a second reference image — `emulator_poster.png`,
-the poster baked into the Android emulator's ARCore virtual scene
-(`<sdk>/emulator/resources/poster.png`, ~2 m wall poster). It lives in
-`app/src/debug/assets/` so release builds don't ship it, and it's only added
-to the image database when `BuildConfig.DEBUG` is true.
+Full AR does **not** work on arm64 API-34 emulators (ARCore's camera HAL maps
+the scene camera to id 10 while its emulator profile wants id 0 → native VIO
+abort; google-ar/arcore-android-sdk#1647). Use a physical device. A debug-only
+`emulator_poster.png` reference image ships in `app/src/debug/assets/` for the
+x86/older-API case where virtualscene still maps to camera 0.
 
-To exercise the spawn flow on an emulator: create an AVD from a
-**Google Play** system image (`google_apis_playstore`), set
-`hw.camera.back = virtualscene` (emulator ≤ 36.x) or `environment`
-(emulator 37.x) and `hw.camera.front = emulated` in its `config.ini`, boot,
-install the debug APK, then aim the virtual camera at the wall poster in the
-virtual scene.
+## How it works
 
-**Known limitation (verified 2025-09 on emulator 37.1.11, Apple Silicon):**
-on the arm64 API 34 Play Store image the scene camera registers as
-`device@1.0/internal/10`, while ARCore's emulator device profile asks for
-camera id `0` — `Session.resume()` then throws `FatalException`
-("Failed to create cameras using image subsystem … unknown device 0").
-This is google-ar/arcore-android-sdk#1647, still open. With
-`hw.camera.back = emulated` the session *does* create (camera 0 exists and
-the AugmentedImage detector runs) but ARCore's VIO aborts on the fake test
-pattern. Net: arm64 API-34 emulators can't run the full AR pipeline; use a
-physical device (what we verified on) or an x86/older-API image on an Intel
-host where virtualscene still maps to camera 0.
+Launch lands in a **scan phase**: the point cloud and detected planes render
+live while the mini-map fills in — a tap on a surface (or Finish/Skip) ends it.
+After that, placement is automatic on the first good surface at screen centre
+(`AUTO_PLACE`), or explicit via tap / "Place in front of me". Only
+**horizontal upward-facing planes** accept placement — walls and ceilings are
+rejected with a hint.
+
+Once placed, the creature lives under a `Plane.createAnchor` whose frame is
+gravity-aligned (local +Y = world up): it stays put through `PAUSED` tracking,
+keeps walking inside its plane's polygon, and drops to a lower plane (with
+gravity + landing squash) if it walks off an edge. Vertical planes block it.
+
+- **Joystick** (bottom-left): camera-relative steering — push up = away from
+  you, however the phone is held. Velocity eases in/out; yaw banks into turns.
+- **Tap a surface**: walk there (targets clamp to the roam circle).
+- **Tap the creature**: reaction animation + floating hearts + haptic.
+- **Right column**: Jump / fly-altitude, Fly↔Land toggle, throw ball, Tricks
+  menu (every spare clip as a one-shot), behaviour cycle Manual → Follow →
+  Wander.
+- **Left column**: photo → `Pictures/DragonAR`, video → `Movies/DragonAR`
+  (share sheet), hide-UI toggle, Google Scene Viewer, Reset.
+- **Pinch**: resize the creature 0.5–6×. **Settings**: occlusion (depth phones),
+  plane overlay, contact shadow, face-camera, debug HUD, rescan/re-place.
+
+Animation is driven by `ClipBlender` straight into the Filament animator
+(SceneView `playAnimation` hard-cuts and restarts clips — never used): idle ↔
+walk ↔ run crossfades by speed, fly-mode fades, phase-synced cycles, one-shot
+actions on top. Clip roles are resolved from names — any rigged GLB with
+idle/walk/run/fly-style clip names works unmodified.
 
 ## Replacing assets
 
 | Asset | Path | Notes |
 |---|---|---|
-| Target image | `app/src/main/assets/images/target.png` | Any PNG/JPG works; textured, high-contrast images track best. Physical width is set in code — `Config.TARGET_IMAGE_WIDTH_M` (`0.15f` metres) in `app/src/main/java/com/dragonsim/ar/Config.kt`. The name registered in the ARCore database is `Config.TARGET_IMAGE_NAME` (`"target"`). Print the image so its real-world width matches, or tracking will be jittery. |
-| Dragon model | `app/src/main/assets/models/dragon.glb` | Any animated GLB. Clip names are resolved at runtime by `DragonMotion.pickClip` — case-insensitive. Idle prefers `"idle"`, else index 0; Walk matches only `"walk"`/`"run"` — when no walk clip exists (flying creatures), the model keeps its idle clip and `animationSpeed` scales with joystick speed instead of hard-cutting poses. The bundled model ships `CharacterArmature|Flying_Idle`, `Fast_Flying`, `Death`, `Headbutt`, `HitReact`, `No`, `Punch`, `Yes`. |
+| Creatures | `app/src/main/assets/models/*.glb` | Registered in `Config.CREATURES`. Skinned GLBs with idle/walk/run/fly clip names are picked up automatically (`ClipSet.resolve`); first entry is the default. See `THIRD_PARTY.md` for licences/attribution. |
+| Target image | `app/src/main/assets/images/target.png` | Physical width `Config.TARGET_IMAGE_WIDTH_M` (0.15 m). Print it at that size or tracking jitters. Used only in Image mode. |
 
 ## Tuning constants
 
@@ -83,98 +105,80 @@ All gameplay numbers live in `app/src/main/java/com/dragonsim/ar/Config.kt`:
 
 | Constant | Default | Meaning |
 |---|---|---|
-| `TARGET_IMAGE_WIDTH_M` | `0.15f` | Physical width of the printed image (m). |
-| `DRAGON_SCALE_UNITS` | `0.1f` | Dragon's bounding box fit into this cube (m). |
-| `DRAGON_Y_OFFSET` | `0f` | Extra lift along the image normal if the pivot isn't at the feet. |
-| `MODEL_YAW_OFFSET_DEG` | `0f` | Additive yaw fix if the model's authored forward isn't +Z. |
-| `MOVE_SPEED_MPS` | `0.1f` | Top flight speed on the image plane (m/s). |
-| `CLAMP_RADIUS_M` | `0.08f` | Max distance from the image centre (m). Was 0.3 per the original brief, but that let the dragon hover two card-widths past a 0.15 m card's edge — reported on-device as "vanishing". 0.08 keeps its centre on the card. |
-
-The dragon is bottom-aligned to the image plane via
-`ModelNode(centerOrigin = Position(0f, -1f, 0f))`, so `DRAGON_Y_OFFSET` normally
-stays at 0.
+| `DRAGON_SCALE_UNITS` | `0.25f` | Creature bbox fitted into this cube (m), before pinch-zoom. |
+| `BODIES_PER_S` | `1.2f` | Walk speed in body lengths/s (×1.6 while flying). |
+| `MAX_ROAM_M` | `5f` | Roam radius around the anchor (m). |
+| `MIN_PLACE_M` / `MAX_PLACE_M` | `0.15` / `3` | Valid tap-to-place distances (m). |
+| `SCAN_TARGET_M2` | `1.5f` | Plane area that counts as a complete scan. |
+| `AUTO_PLACE` | `true` | Auto-place on the first good centred surface after the scan. |
+| `JUMP_HEIGHT_BODIES` | `0.8f` | Jump apex in body sizes. |
+| `CLIMB_SPEED_MPS` / `MAX_FLY_HEIGHT_M` | `0.25` / `1.2` | Fly-mode altitude controls. |
+| `MIN_USER_SCALE` / `MAX_USER_SCALE` | `0.5` / `6` | Pinch-zoom range. |
 
 ## Architecture
 
 ```
 MainActivity            edge-to-edge, hosts DragonSimApp
-DragonSimApp.kt         AppRoot — state machine (Searching/Tracking/Lost/Unsupported),
-                        spawn latch, withFrameNanos motion loop, layout Box
-ar/ARSceneScreen.kt     ARSceneView + AugmentedImageDatabase wiring, image union by
-                        trackableId, clip-name resolution, ModelNode mounting
-ar/DragonMotion.kt      PURE logic (no Android deps): DragonPose, step(), isMoving(),
-                        pickClip() — unit-tested
+DragonSimApp.kt         AppRoot — HUD layout, gestures, prefs, capture share sheet
+Config.kt               tuning constants + CreatureModel registry
+ar/CreatureSim.kt       world state owner, stepped once per AR frame:
+                        scan stats/minimap, placement (plane hit → createAnchor),
+                        steering priority stick > tap > ball > Follow/Wander,
+                        wall rays, ground rays + edge drops, flight, jump, ball,
+                        screen projection (off-screen arrow, tap-to-pet)
+ar/ARSceneScreen.kt     render-only: session config, image DB, point cloud,
+                        AnchorNode → ContactShadow (ShadowReceiverPlane) + ModelNode
+                        transform written imperatively from ModelNode.onFrame
+ar/ClipBlender.kt       Filament animator driver: idle↔walk↔run↔fly crossfades,
+                        mode fades, one-shot actions; ClipSet.resolve clip roles
+ar/DragonMotion.kt      PURE logic (no Android deps): DragonPose, step(), seek(),
+                        yawToward(), cameraRelative() — unit-tested
+ar/Physics.kt           PURE logic: stepVertical (gravity/hover/jump), stepBall
+ar/ArCapture.kt         photo/video via SceneView SurfaceMirrorer → MediaStore
 ui/Joystick.kt          120dp base / 48dp knob, normalized [-1,1] output
-ui/StatusOverlay.kt     status chip + Reset button + full-screen error state
+ui/Controls.kt          RoundAction/HoldAction/HintPill/SettingsSheet/reactions
+ui/ScanUi.kt            scan overlay + MiniMap canvas
+ui/StatusOverlay.kt     full-screen ARCore error state
+SceneViewerLauncher.kt  opens the creature in Google's Scene Viewer (web URL)
+web/index.html          WebXR sibling build (three.js), web/models → assets symlink
 ```
-
-Movement mapping: joystick up (screen `-y`) → image-local `-z` ("up" the printed
-image, since +Z runs top→bottom).
-
-Flight model (`DragonMotion.step`, all exponential, dt-based):
-
-- **Velocity** eases toward `stick × MOVE_SPEED_MPS` (~0.1 s constant) — the
-  dragon glides in/out instead of popping between still and full speed.
-- **Yaw** eases toward `atan2(dx, dz)` while input is held — a flyer keeps its
-  heading during a glide-out.
-- **Roll** banks into turns proportional to yaw rate (max ±22°), **pitch** dips
-  ~10° at full speed; both ease back to level when the dragon stops.
-- **Clamp**: position is capped inside `CLAMP_RADIUS_M` and velocity is
-  recomputed from actual displacement, so it doesn't push at the boundary.
-- **Wings**: the bundled dragon is a flyer with no walk clip, so `Flying_Idle`
-  plays continuously and `animationSpeed` scales 0.9→2.1× with speed — a
-  hard cut to `Fast_Flying` was what made the dragon appear to "change size"
-  (the two clips' torso poses differ by ~0.66 model units). Drop in a GLB with
-  a real `walk`/`run` clip and it switches clips on movement automatically.
-
-Tracking semantics: the dragon renders only while `trackingMethod ==
-FULL_TRACKING` (the image is actually in view). ARCore keeps an
-`AugmentedImage` at `trackingState == TRACKING` via `LAST_KNOWN_POSE` long
-after it leaves the frame, so the status text and the post-reset respawn
-latch are driven by `trackingMethod`, not `trackingState` — gating on the
-latter is what made "image lost" never appear and reset look broken.
 
 ## Manual device-test checklist
 
-1. **Launch** — camera preview appears, status chip reads "Point your camera at the image".
-2. **Spawn** — point at the printed `target.png`: exactly one dragon appears standing on it.
-3. **Anchoring** — move/tilt the phone: the dragon stays glued to the image.
-4. **Hide/show** — move the camera off the image (dragon hides via `FULL_TRACKING` visibility), back on (dragon reappears). Status shows "Image lost — point back at it" while the image isn't tracked.
-5. **Joystick** — push it: dragon glides in that direction, turns to face its travel direction, banks into the turn, flaps faster; release: it glides to a stop and levels out. Its size never changes — the same clip plays throughout.
-6. **Clamp** — hold the stick fully one direction: dragon stops at the 0.08 m radius and stays over the 0.15 m card.
-7. **Reset** — tap Reset: dragon despawns, status returns to "Point your camera at the image". Still pointing at the image → no re-spawn; move away and back → dragon respawns.
-8. **Unsupported device** — run on a non-ARCore device/emulator: full-screen message ("This device doesn't support ARCore" / "AR failed to start: …"), never a black screen.
+1. **Launch** — scan overlay appears; point cloud + plane outlines render as you
+   sweep the room; mini-map grows.
+2. **Spawn** — tap a floor/table (or Finish scan and let auto-place fire):
+   exactly one dragon pops in facing you. Tapping a wall shows
+   "That's a wall — tap the floor or a table".
+3. **Joystick** — glides camera-relative, banks into turns, settles to rest on
+   release; same idle/walk clip blends — no size pop.
+4. **Tap-to-walk** — tap the surface: it walks there; taps beyond the roam
+   circle clamp and it arrives instead of pinning at the boundary.
+5. **Edge drop** — walk it off a table: falls, lands on the floor, re-anchors.
+6. **Vertical blocking** — walls stop it.
+7. **Fly/Land** — 🪽 toggles flight; ⬆️/⬇️ change altitude; clips crossfade.
+8. **Tricks/ball/jump** — one-shots play on top; ball bounces, it fetches.
+9. **Hide/show tracking** — cover the camera: creature holds last pose (PAUSED),
+   hint appears, recovers.
+10. **Reset** — despawns; in Image mode respawn re-arms only after the image is
+    lost once.
+11. **Unsupported device** — full-screen error, never a black view.
 
-## Assumptions & unverified
+## Verified on-device (iQOO I2202, Android 14, ARCore)
 
-**Verified on a physical device** (iQOO I2202, Android 14, ARCore 1.56 —
-debug APK installed over `adb`, `target.png` shown on a Mac screen):
+- Session live: camera feed, scan overlay, point cloud, mini-map, debug HUD
+  (`cam=TRACKING`, `spawned`, `pose=`, `v=`, `fly=`, `joy=`).
+- Auto-place spawned the dragon on a detected surface; HUD reported a sane pose.
+- Earlier flow (image target + joystick glide/bank/settle) verified live.
 
-- App launches, camera feed renders, status chip shows "Point your camera at
-  the image" while searching and hides while tracking.
-- The image is detected and **exactly one dragon spawns anchored to it**;
-  the joystick appears only after spawn; the Reset button is present.
-- On the API-34 emulator, where ARCore's camera HAL is unusable, the same
-  build renders the **opaque error screen** ("AR failed to start:
-  FatalException") instead of a black view — the Unsupported path works.
+**Still to eyeball**: surface-mode joystick feel post wall-anchor fix, Dark
+Dragon's look/scale/forward axis (`CreatureModel.yawOffsetDeg` if it walks
+backwards), edge drops, occlusion on a depth phone.
 
-- A live joystick drag was observed via the debug HUD: pose integrated to
-  (0.03, 0.00) m, yaw eased to -106°, roll banked to +14.7°, pitch dipped, and
-  velocity/pitch/roll all settled to exact zero on release — glide-in/out,
-  banking, and the no-size-change animation path confirmed on hardware.
-- "Image lost — point back at it" banner appears the moment `trackingMethod`
-  drops to `LAST_KNOWN_POSE`.
+## Assumptions & caveats
 
-Still worth confirming by eye while holding the device:
-
-- The dragon's banking/pitch/flap-rate look right from a natural viewing angle.
-- Dragon hide/show on camera-away then camera-back transitions.
-- Reset → move-away → re-approach respawn latch.
-
-Everything else below remains assume-at-your-own-risk:
-- Clip names in `models/dragon.glb` are unknown until it loads — `pickClip` guesses from names and logs the resolved choice (`adb logcat -s ARSceneScreen`). If the GLB's forward axis isn't +Z, set `MODEL_YAW_OFFSET_DEG`.
-- `TrackingMethod` import is `com.google.ar.core.AugmentedImage.TrackingMethod` (nested enum) — verified against the SceneView source, which imports it the same way.
-- Session-failure routing uses `onSessionFailure` (`ARSessionFailure` sealed class); `DeviceNotCompatible`/`SessionUnsupported` map to the unsupported-device message and cover `UnavailableDeviceNotCompatibleException`.
-- SceneView auto-handles the CAMERA runtime permission on a `ComponentActivity` (`ARPermissionHandler` auto-detect); a denial surfaces as a session failure → error screen.
-- After Reset while still pointing at the image, the status text reads "Point your camera at the image" even though the respawn latch is armed — by design (move away and back to respawn).
-- Plugin versions are inlined in the root `build.gradle.kts` `plugins {}` block (Kotlin DSL resolves `plugins {}` before top-level `val`s — they can't live in variables).
+- `web/` is a local WebXR demo: serve the folder over HTTPS or localhost and open
+  in Chrome on an ARCore phone (`models` is a symlink into the Android assets).
+- `Dark Dragon` is CC-BY (see `THIRD_PARTY.md`) — attribution required if the
+  app is distributed.
+- Emulators can't run the AR pipeline (see above) — always verify on hardware.

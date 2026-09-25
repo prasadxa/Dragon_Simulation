@@ -6,19 +6,11 @@ import kotlin.math.exp
 import kotlin.math.sqrt
 
 /**
- * Which animation clip to request from the model. Names in the GLB are unknown until
- * load time, so [DragonMotion.pickClip] resolves them heuristically.
- */
-enum class ClipKind { Idle, Walk }
-
-/**
- * Dragon pose in the tracked image's local frame.
+ * Creature pose in its anchor's frame. The anchor is gravity-aligned (+Y = world
+ * up), so XZ is the horizontal plane and Y is height.
  *
- * Image-local axes (ARCore AugmentedImage): +X = left→right across the image,
- * +Y = out of the image face, +Z = top→bottom. The dragon moves on the XZ plane.
- *
- * @param x        metres right of image centre
- * @param z        metres down from image centre (so "up the image" is -z)
+ * @param x        metres along anchor +X
+ * @param z        metres along anchor +Z
  * @param yawDeg   facing direction in degrees; 0 = +Z, 90 = +X (see [DragonMotion.step])
  * @param pitchDeg nose-down while moving (negative = dips toward travel direction)
  * @param rollDeg  bank while turning (positive = right wing lifts)
@@ -33,6 +25,11 @@ data class DragonPose(
     val rollDeg: Float = 0f,
     val velX: Float = 0f,
     val velZ: Float = 0f,
+    /** Height of the feet above the anchor origin, metres. */
+    val y: Float = 0f,
+    /** Vertical velocity, m/s (positive = up). */
+    val velY: Float = 0f,
+    val grounded: Boolean = true,
 )
 
 /**
@@ -59,6 +56,9 @@ object DragonMotion {
     /** Below this, residual values snap to zero so a parked dragon rests exactly. */
     private const val SETTLE_EPS = 0.01f
 
+    /** Idle turn-to-face runs at a fraction of the travel turn rate. */
+    private const val FACE_RATE_SCALE = 0.25f
+
     /**
      * @param input (x, y) joystick output in screen convention — y is negative when the
      *              stick is pushed up. Pushing up maps to -z on the image ("up" the image).
@@ -83,6 +83,9 @@ object DragonMotion {
         dtSeconds: Float,
         speedMps: Float,
         maxRadius: Float,
+        /** When idle, slowly turn to face this yaw (e.g. toward the camera). */
+        faceYawDeg: Float? = null,
+        maxPitchDeg: Float = MAX_PITCH_DEG,
     ): DragonPose {
         if (dtSeconds <= 0f) return pose
 
@@ -119,15 +122,20 @@ object DragonMotion {
             val newYaw = approachYaw(pose.yawDeg, targetYawDeg, dtSeconds)
             yawRateDegS = wrapDeg(newYaw - pose.yawDeg) / dtSeconds
             yawDeg = newYaw
+        } else if (faceYawDeg != null && vx == 0f && vz == 0f) {
+            yawDeg = approachYaw(pose.yawDeg, faceYawDeg, dtSeconds * FACE_RATE_SCALE)
         }
 
         val speedNorm = (sqrt(vx * vx + vz * vz) / speedMps).coerceIn(0f, 1f)
         val rollTarget = (-yawRateDegS * BANK_PER_DEG_S).coerceIn(-MAX_BANK_DEG, MAX_BANK_DEG)
-        val pitchTarget = -speedNorm * MAX_PITCH_DEG
+        val pitchTarget = -speedNorm * maxPitchDeg
         val rollDeg = settle(pose.rollDeg + (rollTarget - pose.rollDeg) * blend)
         val pitchDeg = settle(pose.pitchDeg + (pitchTarget - pose.pitchDeg) * blend)
 
-        return DragonPose(nx, nz, yawDeg, pitchDeg, rollDeg, vx, vz)
+        return pose.copy(
+            x = nx, z = nz, yawDeg = yawDeg, pitchDeg = pitchDeg, rollDeg = rollDeg,
+            velX = vx, velZ = vz,
+        )
     }
 
     /** Exponential shortest-arc approach of [targetDeg] from [currentDeg]. */
@@ -148,21 +156,45 @@ object DragonMotion {
     }
 
     /**
-     * Resolve a GLB animation name for [kind]. Case-insensitive.
-     * Idle prefers names containing "idle", else index 0.
-     * Walk only matches literal "walk"/"run" — when a model can't walk (flying
-     * creatures), the caller keeps the idle clip and modulates playback speed
-     * instead of hard-cutting to an unrelated pose.
+     * Steering input (same convention as a stick, magnitude 0..1) that walks from
+     * (fromX, fromZ) toward (toX, toZ), easing off inside [arriveRadius] and
+     * returning zero within [stopRadius].
      */
-    fun pickClip(names: List<String>, kind: ClipKind): String? {
-        if (names.isEmpty()) return null
+    fun seek(
+        fromX: Float, fromZ: Float, toX: Float, toZ: Float,
+        arriveRadius: Float, stopRadius: Float,
+    ): Pair<Float, Float> {
+        val dx = toX - fromX
+        val dz = toZ - fromZ
+        val d = sqrt(dx * dx + dz * dz)
+        if (d <= stopRadius || d < 1e-5f) return 0f to 0f
+        val mag = ((d - stopRadius) / arriveRadius).coerceIn(INPUT_DEADZONE + 0.05f, 1f)
+        return (dx / d * mag) to (dz / d * mag)
+    }
 
-        fun find(vararg needles: String): String? =
-            names.firstOrNull { name -> needles.any { name.lowercase().contains(it) } }
+    /** Yaw (degrees, [step] convention: 0 = +Z, 90 = +X) looking from a point toward another. */
+    fun yawToward(fromX: Float, fromZ: Float, toX: Float, toZ: Float): Float =
+        Math.toDegrees(atan2((toX - fromX).toDouble(), (toZ - fromZ).toDouble())).toFloat()
 
-        return when (kind) {
-            ClipKind.Idle -> find("idle") ?: names[0]
-            ClipKind.Walk -> find("walk", "run")
-        }
+    /**
+     * Rotates a screen-space stick (x right, y down) into image-local (x, z) so
+     * "push up" moves the creature away from the viewer along the screen's up
+     * direction, however the phone is held around the image.
+     *
+     * [upX]/[upZ] = the camera's screen-up axis projected onto the image plane
+     * (image-local). Using screen-up rather than view-forward keeps this valid
+     * both looking down at a table print and facing a vertical monitor. When the
+     * projection degenerates, the stick passes through unchanged.
+     */
+    fun cameraRelative(stick: Pair<Float, Float>, upX: Float, upZ: Float): Pair<Float, Float> {
+        val len = sqrt(upX * upX + upZ * upZ)
+        if (len < 1e-3f) return stick
+        val fx = upX / len
+        val fz = upZ / len
+        // right = forward rotated -90° on the plane; identity when forward = (0, -1).
+        val rx = -fz
+        val rz = fx
+        val (sx, sy) = stick
+        return (sx * rx - sy * fx) to (sx * rz - sy * fz)
     }
 }

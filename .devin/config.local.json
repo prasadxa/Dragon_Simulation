@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Exec(ls)"
+      "Exec(ls)",
+      "Exec(adb)",
+      "Exec(./gradlew)",
+      "Exec(curl)"
     ]
   }
 }

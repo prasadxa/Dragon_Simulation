@@ -5,7 +5,20 @@ object Config {
 
     // ── Assets ───────────────────────────────────────────────────────────────
     const val TARGET_IMAGE_ASSET = "images/target.png"
-    const val DRAGON_MODEL_ASSET = "models/dragon.glb"
+
+    /** Selectable creatures (in-app picker). First entry is the default. */
+    val CREATURES = listOf(
+        CreatureModel("Dark Dragon", "models/dragon_dark.glb"),
+        CreatureModel(
+            "Dragon", "models/dragon.glb",
+            webUrl = "https://static.poly.pizza/90ed3740-d8c4-4910-88ce-ac2ed426022d.glb",
+        ),
+        CreatureModel("Classic Dragon", "models/dragon_classic.glb"),
+        CreatureModel(
+            "Fox", "models/fox.glb",
+            webUrl = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Fox/glTF-Binary/Fox.glb",
+        ),
+    )
 
     // ── Tracking ─────────────────────────────────────────────────────────────
     /** Name the reference image is registered under in the AugmentedImageDatabase. */
@@ -24,7 +37,7 @@ object Config {
 
     // ── Dragon placement ─────────────────────────────────────────────────────
     /** Uniform scale: the dragon's bounding box is shrunk to fit this cube (metres). */
-    const val DRAGON_SCALE_UNITS = 0.1f
+    const val DRAGON_SCALE_UNITS = 0.25f
 
     /** Extra lift along the image normal if the model's pivot isn't at its feet. */
     const val DRAGON_Y_OFFSET = 0f
@@ -36,11 +49,49 @@ object Config {
     /** Walk speed on the image plane, metres/second. */
     const val MOVE_SPEED_MPS = 0.1f
 
-    /**
-     * Max distance from the image centre (m). The brief asked for 0.3 m, but on a
-     * 0.15 m card that let the dragon hover two card-widths past the edge —
-     * reported on-device as "the dragon vanishes". 0.08 keeps its centre on the
-     * card while still allowing visible travel.
-     */
-    const val CLAMP_RADIUS_M = 0.08f
+    /** Walking speed in body lengths per second — bigger creatures move faster. */
+    const val BODIES_PER_S = 1.2f
+
+
+    // ── World physics / behaviour ────────────────────────────────────────────
+    /** Creatures may roam this far from where they were placed (m). */
+    const val MAX_ROAM_M = 5f
+    const val THROW_SPEED_MPS = 1.4f
+    const val BALL_RADIUS_M = 0.012f
+    /** Jump apex, in body sizes. */
+    const val JUMP_HEIGHT_BODIES = 0.8f
+    const val CLIMB_SPEED_MPS = 0.25f
+    const val MAX_FLY_HEIGHT_M = 1.2f
+
+    /** Placement sanity: ignore hits closer/farther than this from the camera (m). */
+    const val MIN_PLACE_M = 0.15f
+    const val MAX_PLACE_M = 3f
+    // ── Room scan ────────────────────────────────────────────────────────────
+    /** Detected surface area that counts as a complete scan (m²). */
+    const val SCAN_TARGET_M2 = 1.5f
+    /** After the scan, place automatically on the first good surface (Scene Viewer style). */
+    const val AUTO_PLACE = true
+
+    /** A ground below further than this is treated as bad depth, not a drop. */
+    const val MAX_FALL_M = 2.5f
+
+    // ── Pinch-to-zoom ────────────────────────────────────────────────────────
+    const val MIN_USER_SCALE = 0.5f
+    const val MAX_USER_SCALE = 6f
 }
+
+/**
+ * A bundled GLB. Clips are resolved by name at load (idle + walk/run/fly), so any
+ * rigged glTF with those names works without code changes.
+ *
+ * @param scaleUnits bounding box is fitted into this cube (metres) before pinch-zoom.
+ * @param yawOffsetDeg additive yaw if the model's authored forward isn't +Z.
+ */
+data class CreatureModel(
+    val label: String,
+    val asset: String,
+    val scaleUnits: Float = Config.DRAGON_SCALE_UNITS,
+    val yawOffsetDeg: Float = Config.MODEL_YAW_OFFSET_DEG,
+    /** Public copy of the same GLB, for Google Scene Viewer (it needs a URL). */
+    val webUrl: String? = null,
+)

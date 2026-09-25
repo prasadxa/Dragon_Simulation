@@ -12,36 +12,48 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntSize
 import com.dragonsim.ar.BuildConfig
 import com.dragonsim.ar.Config
 import com.dragonsim.ar.R
-import com.google.ar.core.AugmentedImage
-import com.google.ar.core.AugmentedImage.TrackingMethod
 import com.google.ar.core.AugmentedImageDatabase
+import com.google.ar.core.CameraConfig
+import com.google.ar.core.CameraConfigFilter
+import com.google.ar.core.Session
+import com.google.ar.core.TrackingState
 import io.github.sceneview.ar.ARSceneView
 import io.github.sceneview.ar.ARSessionFailure
+import io.github.sceneview.ar.rememberARCameraStream
 import io.github.sceneview.math.Position
 import io.github.sceneview.math.Rotation
+import io.github.sceneview.math.Scale
+import io.github.sceneview.node.ModelNode
+import dev.romainguy.kotlin.math.Float4
+import dev.romainguy.kotlin.math.rotation
 import io.github.sceneview.rememberEngine
-import kotlin.math.hypot
+import io.github.sceneview.rememberMaterialLoader
 import io.github.sceneview.rememberModelInstance
 import io.github.sceneview.rememberModelLoader
+import io.github.sceneview.utils.SurfaceMirrorer
 
 private const val TAG = "ARSceneScreen"
+private val VISIBLE_STATES = setOf(TrackingState.TRACKING, TrackingState.PAUSED)
 
 /**
- * The ARCore view: registers the reference image, tracks it, and mounts the dragon
- * model on the first matching [AugmentedImage] while [spawned] is true.
- *
- * Callbacks report outward so [com.dragonsim.ar.AppRoot] can own the state machine.
+ * Renders [sim] into an ARCore scene. All behaviour lives in [CreatureSim]; this
+ * composable wires the session config, forwards each AR frame to the sim, and
+ * draws the creature, its contact shadow and the thrown ball under the anchor.
  */
 @Composable
 fun ARSceneScreen(
-    spawned: Boolean,
-    pose: DragonPose,
-    isMoving: Boolean,
-    onTrackingChanged: (AugmentedImage?) -> Unit,
+    sim: CreatureSim,
+    occlusion: Boolean,
+    showPlanes: Boolean,
+    showShadow: Boolean,
+    mirrorer: SurfaceMirrorer?,
     onSessionError: (String) -> Unit,
     onDebugHud: (String) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -49,32 +61,42 @@ fun ARSceneScreen(
     val context = LocalContext.current
     val engine = rememberEngine()
     val modelLoader = rememberModelLoader(engine)
-    val modelInstance = rememberModelInstance(modelLoader, Config.DRAGON_MODEL_ASSET)
+    val materialLoader = rememberMaterialLoader(engine)
+    val cameraStream = rememberARCameraStream(materialLoader)
+    val creature = sim.creature
+    val modelInstance = rememberModelInstance(modelLoader, creature.asset)
+    val pointMaterial = remember(materialLoader) {
+        materialLoader.createColorInstance(Color(0xFF00E5FF), metallic = 0f, roughness = 1f)
+    }
+    val ballMaterial = remember(materialLoader) {
+        materialLoader.createColorInstance(Color(0xFFFF7043), metallic = 0f, roughness = 0.35f)
+    }
+    var viewSize by remember { mutableStateOf(IntSize.Zero) }
 
     // Reference image for the AugmentedImageDatabase — decoded once, forced to ARGB_8888.
-    val targetBitmap = remember {
-        decodeAssetBitmap(context, Config.TARGET_IMAGE_ASSET)
+    val targetBitmap = remember { decodeAssetBitmap(context, Config.TARGET_IMAGE_ASSET) }
+
+    // Real-world occlusion from the Depth API — only on devices that support it:
+    // without depth data the occlusion pass can hide the creature entirely.
+    var depthSupported by remember { mutableStateOf(false) }
+    LaunchedEffect(occlusion, depthSupported) {
+        cameraStream.isDepthOcclusionEnabled = occlusion && depthSupported
+        Log.i(TAG, "occlusion requested=$occlusion depthSupported=$depthSupported")
     }
 
-    // Union of every AugmentedImage the session has ever returned — ARCore reuses
-    // the same object per physical image across frames, so the node survives
-    // frames where the image drops out of getUpdatedTrackables().
-    var detectedImages by remember { mutableStateOf(listOf<AugmentedImage>()) }
-
-    // GLB clip names are unknown until the model loads — resolve once per instance.
-    var idleClip by remember { mutableStateOf<String?>(null) }
-    var walkClip by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(modelInstance) {
-        val names = modelInstance?.let { instance ->
-            (0 until instance.animator.animationCount).map { instance.animator.getAnimationName(it) }
-        }.orEmpty()
-        idleClip = DragonMotion.pickClip(names, ClipKind.Idle)
-        walkClip = DragonMotion.pickClip(names, ClipKind.Walk)
-        Log.d(TAG, "dragon.glb clips=$names -> idle=$idleClip walk=$walkClip")
+    // One blender per loaded model — captured by that model's node, so a node
+    // mid-teardown never drives another model's animator.
+    val blender = remember(modelInstance) {
+        modelInstance?.let { ClipBlender.forAnimator(it.animator) }
+    }
+    LaunchedEffect(blender) {
+        val animator = modelInstance?.animator ?: return@LaunchedEffect
+        val names = (0 until animator.animationCount).map { animator.getAnimationName(it) }
+        Log.d(TAG, "${creature.asset} clips=$names -> ${blender?.clips}")
+        sim.clipNames = names
+        blender?.let { sim.onModelLoaded(it.clips, it) }
     }
 
-    // Surface a packaging bug (missing target.png) as an error instead of
-    // silently searching forever.
     LaunchedEffect(targetBitmap) {
         if (targetBitmap == null) {
             onSessionError("Missing or unreadable asset: ${Config.TARGET_IMAGE_ASSET}")
@@ -82,31 +104,40 @@ fun ARSceneScreen(
     }
 
     ARSceneView(
-        modifier = modifier,
+        modifier = modifier.onSizeChanged { viewSize = it },
         engine = engine,
         modelLoader = modelLoader,
-        // Image tracking only — skip plane detection cost and plane dots.
-        planeRenderer = false,
+        materialLoader = materialLoader,
+        cameraStream = cameraStream,
+        sessionCameraConfig = ::preferredCameraConfig,
+        // Placement uses planes only (official SceneView tap-to-place pattern). Depth is
+        // only switched on for the optional occlusion setting.
+        depthMode = if (occlusion) com.google.ar.core.Config.DepthMode.AUTOMATIC
+        else com.google.ar.core.Config.DepthMode.DISABLED,
+        instantPlacementMode = com.google.ar.core.Config.InstantPlacementMode.DISABLED,
+        planeRenderer = sim.phase == Phase.Scanning || (showPlanes && !sim.spawned),
+        surfaceMirrorer = mirrorer,
+        onSessionCreated = { session -> if (BuildConfig.DEBUG) startDebugPlayback(context, session) },
+        onSessionResumed = { session -> if (BuildConfig.DEBUG) startDebugRecording(context, session) },
         sessionConfiguration = { session, config ->
+            Log.i(TAG, "sessionConfiguration invoked")
             val bitmap = targetBitmap
             if (bitmap == null) {
                 onSessionError("Missing or unreadable asset: ${Config.TARGET_IMAGE_ASSET}")
             } else {
+                configureStability(session, config)
+                depthSupported = session.isDepthModeSupported(com.google.ar.core.Config.DepthMode.AUTOMATIC)
                 config.augmentedImageDatabase = AugmentedImageDatabase(session).also { db ->
                     db.addImage(Config.TARGET_IMAGE_NAME, bitmap, Config.TARGET_IMAGE_WIDTH_M)
                     // Debug-only extra reference image: the poster baked into the
-                    // Android emulator's ARCore virtual scene (sdk/emulator/resources/
-                    // poster.png). Lets the spawn flow be exercised without a printed
-                    // image. Lives in src/debug/assets so release builds don't ship it.
+                    // Android emulator's ARCore virtual scene. Lives in src/debug/assets
+                    // so release builds don't ship it.
                     if (BuildConfig.DEBUG) {
                         decodeAssetBitmap(context, Config.EMULATOR_POSTER_ASSET)?.let { poster ->
-                            db.addImage(
-                                Config.EMULATOR_POSTER_NAME,
-                                poster,
-                                Config.EMULATOR_POSTER_WIDTH_M,
-                            )
+                            db.addImage(Config.EMULATOR_POSTER_NAME, poster, Config.EMULATOR_POSTER_WIDTH_M)
                         }
                     }
+                    Log.i(TAG, "image database: ${db.numImages} image(s)")
                 }
             }
         },
@@ -114,77 +145,165 @@ fun ARSceneScreen(
             Log.e(TAG, "AR session failure: $failure", failure.cause)
             onSessionError(failure.toUserMessage(context))
         },
-        onSessionUpdated = { _, frame ->
-            val updated = frame.getUpdatedTrackables(AugmentedImage::class.java)
-            if (updated.isNotEmpty()) {
-                // Identity check: same physical image => same object each frame.
-                val fresh = updated.filter { u -> detectedImages.none { it === u } }
-                if (fresh.isNotEmpty()) {
-                    detectedImages = detectedImages + fresh
-                }
-            }
-            val img = pickTargetImage(detectedImages)
-            // "Is the image actually being observed right now?" — ARCore keeps an
-            // AugmentedImage at trackingState=TRACKING via LAST_KNOWN_POSE long
-            // after it leaves the FOV, so callers gate on trackingMethod, not
-            // trackingState.
-            onTrackingChanged(img)
+        onSessionUpdated = { session, frame ->
+            sim.onArFrame(session, frame, viewSize.width, viewSize.height)
             if (BuildConfig.DEBUG) {
                 onDebugHud(
-                    "img=${img?.name} m=${img?.trackingMethod} s=${img?.trackingState}" +
+                    "cam=${frame.camera.trackingState} img=${sim.imageTracked}" +
                         " | model=${if (modelInstance != null) "ok" else "loading"}",
                 )
             }
         },
         onTrackingFailureChanged = { reason -> Log.d(TAG, "tracking failure changed: $reason") },
     ) {
-        // ARSceneScope — one dragon only, gated on the first matching image.
-        val image = pickTargetImage(detectedImages)
-        if (spawned && image != null) {
-            key(image) {
-                AugmentedImageNode(
-                    augmentedImage = image,
-                    // Hide children when the camera leaves the image — don't also
-                    // toggle child visibility ourselves.
-                    visibleTrackingMethods = setOf(TrackingMethod.FULL_TRACKING),
-                ) {
-                    modelInstance?.let { instance ->
-                        // 0..1 fraction of top speed — drives flap rate and pitch.
-                        val speedNorm = (
-                            hypot(pose.velX, pose.velZ) / Config.MOVE_SPEED_MPS
-                            ).coerceIn(0f, 1f)
+        if (sim.phase == Phase.Scanning) {
+            // Live 3D feature points while scanning (SceneView ARPointCloudDemo pattern).
+            val cloud = rememberPointCloud(
+                confidenceThreshold = 0.2f,
+                materialInstance = pointMaterial,
+                onPointCloudUpdated = { sim.scanPoints = it },
+            )
+            PointCloudNode(node = cloud)
+        }
+        val anchor = sim.anchor ?: return@ARSceneView
+        // Real shadows cast onto the detected surfaces (SceneView ShadowReceiverPlane).
+        if (showShadow) {
+            sim.shadowPlanes.forEach { plane -> key(plane) { ShadowReceiverPlane(plane = plane) } }
+        }
+        key(anchor) {
+            // TRACKING + PAUSED: keep the creature at its last pose through brief tracking
+            // loss instead of vanishing (SceneView sample finding #1435).
+            AnchorNode(anchor = anchor, visibleTrackingStates = VISIBLE_STATES) {
+                modelInstance?.let { instance ->
+                    key(instance) {
                         ModelNode(
                             modelInstance = instance,
+                            // Nothing is played through SceneView (its playAnimation
+                            // hard-cuts and restarts clips); ClipBlender drives the
+                            // Filament animator from onFrame instead.
                             autoAnimate = false,
-                            // A model with a real walk/run clip switches clips on
-                            // movement. A flying creature has none — keep its idle
-                            // clip and flap faster instead of hard-cutting to an
-                            // incompatible pose (that cut reads as a size pop).
-                            animationName = walkClip?.let { if (isMoving) it else idleClip }
-                                ?: idleClip,
-                            animationSpeed = if (walkClip == null) 0.9f + speedNorm * 1.2f else 1f,
-                            animationLoop = true,
-                            scaleToUnits = Config.DRAGON_SCALE_UNITS,
-                            // Bottom-align the bounding box so the dragon stands on the image.
+                            scaleToUnits = creature.scaleUnits,
+                            // Bottom-align the bounding box so the creature stands on the ground.
                             centerOrigin = Position(0f, -1f, 0f),
-                            position = Position(pose.x, Config.DRAGON_Y_OFFSET, pose.z),
-                            // Euler: pitch dips toward travel, yaw faces it, roll banks turns.
-                            rotation = Rotation(
-                                pose.pitchDeg,
-                                pose.yawDeg + Config.MODEL_YAW_OFFSET_DEG,
-                                pose.rollDeg,
-                            ),
+                            apply = {
+                                val node = this
+                                isShadowCaster = true
+                                // Creation-time fit scale + bottom-align offset, copied
+                                // (Float3 is mutable) before we start driving the node.
+                                val baseScale = Scale(node.scale.x, node.scale.y, node.scale.z)
+                                val baseOffset = Position(node.position.x, node.position.y, node.position.z)
+                                // Transform is written imperatively every frame: a wrapper
+                                // Node's transform did not reach the model on-device (only
+                                // the shadow moved), and this avoids per-frame recomposition.
+                                onFrame = { nanos ->
+                                    blender?.onFrame(node.animator, nanos)
+                                    driveCreature(node, sim, baseScale, baseOffset, creature.yawOffsetDeg)
+                                }
+                            },
                         )
                     }
+                }
+                sim.ball?.let { b ->
+                    val r = Config.BALL_RADIUS_M
+                    SphereNode(
+                        radius = r,
+                        materialInstance = ballMaterial,
+                        position = Position(b.x, b.y + r * sim.userScale, b.z),
+                        scale = Scale(sim.userScale),
+                    )
                 }
             }
         }
     }
 }
 
-/** Prefer the image registered as [Config.TARGET_IMAGE_NAME]; fall back to the first seen. */
-private fun pickTargetImage(images: List<AugmentedImage>): AugmentedImage? =
-    images.firstOrNull { it.name == Config.TARGET_IMAGE_NAME } ?: images.firstOrNull()
+/**
+ * Pose + zoom + pop-in + landing squash onto the model node. The bottom-align
+ * offset is scaled and rotated with the body so the creature pivots and
+ * squashes about its feet.
+ */
+private fun driveCreature(
+    node: ModelNode,
+    sim: CreatureSim,
+    baseScale: Scale,
+    baseOffset: Position,
+    yawOffsetDeg: Float,
+) {
+    val p = sim.pose
+    val k = sim.userScale * easeOutBack(sim.spawnProgress).coerceAtLeast(0.01f)
+    val sq = sim.squash
+    val kxz = k * (1f + sq * 0.5f)
+    val ky = k * (1f - sq)
+    val rot = Rotation(p.pitchDeg, p.yawDeg + yawOffsetDeg, p.rollDeg)
+    val off = rotation(rot) * Float4(baseOffset.x * kxz, baseOffset.y * ky, baseOffset.z * kxz, 0f)
+    node.position = Position(p.x + off.x, p.y + Config.DRAGON_Y_OFFSET + off.y, p.z + off.z)
+    node.rotation = rot
+    node.scale = Scale(baseScale.x * kxz, baseScale.y * ky, baseScale.z * kxz)
+}
+
+/** Overshoot ease for the spawn pop-in. */
+private fun easeOutBack(t: Float): Float {
+    val c1 = 1.70158f
+    val c3 = c1 + 1f
+    val u = t - 1f
+    return 1f + c3 * u * u * u + c1 * u * u
+}
+
+/**
+ * ARCore's own default config (first in the list, tuned for tracking) unless the
+ * phone has a hardware depth sensor, which ARCore fuses into tracking. Picking the
+ * highest-resolution CPU image slows tracking on mid-range phones.
+ */
+private fun preferredCameraConfig(session: Session): CameraConfig {
+    val all = session.getSupportedCameraConfigs(CameraConfigFilter(session))
+    val chosen = all.firstOrNull { it.depthSensorUsage == CameraConfig.DepthSensorUsage.REQUIRE_AND_USE }
+        ?: session.cameraConfig
+    Log.i(TAG, "camera config: ${chosen.imageSize} fps=${chosen.fpsRange} depth=${chosen.depthSensorUsage}")
+    return chosen
+}
+
+/**
+ * Debug-only ARCore Recording & Playback so the app can be tested on-device
+ * without a person moving the phone:
+ *   record: adb shell am start -n com.dragonsim.ar/.MainActivity --ez record true
+ *   replay: adb shell am start -n com.dragonsim.ar/.MainActivity --ez playback true
+ * The dataset lives at <external files>/session.mp4.
+ */
+private fun debugDataset(context: Context) = java.io.File(context.getExternalFilesDir(null), "session.mp4")
+
+private fun startDebugPlayback(context: Context, session: Session) {
+    val intent = (context as? android.app.Activity)?.intent ?: return
+    if (!intent.getBooleanExtra("playback", false)) return
+    val file = debugDataset(context)
+    runCatching { session.setPlaybackDatasetUri(android.net.Uri.fromFile(file)) }
+        .onSuccess { Log.i(TAG, "playback from $file") }
+        .onFailure { Log.e(TAG, "playback failed", it) }
+}
+
+private fun startDebugRecording(context: Context, session: Session) {
+    val intent = (context as? android.app.Activity)?.intent ?: return
+    if (!intent.getBooleanExtra("record", false) || session.recordingStatus == com.google.ar.core.RecordingStatus.OK) return
+    val file = debugDataset(context)
+    runCatching {
+        session.startRecording(
+            com.google.ar.core.RecordingConfig(session)
+                .setMp4DatasetUri(android.net.Uri.fromFile(file))
+                .setAutoStopOnPause(true),
+        )
+    }.onSuccess { Log.i(TAG, "recording to $file") }
+        .onFailure { Log.e(TAG, "recording failed", it) }
+}
+
+/**
+ * Continuous autofocus (sharper features at close range) and ARCore electronic
+ * image stabilisation where the device supports it (ARCore 1.43+).
+ */
+private fun configureStability(session: Session, config: com.google.ar.core.Config) {
+    config.focusMode = com.google.ar.core.Config.FocusMode.AUTO
+    val eis = com.google.ar.core.Config.ImageStabilizationMode.EIS
+    if (session.isImageStabilizationModeSupported(eis)) config.imageStabilizationMode = eis
+    Log.i(TAG, "stability: eis=${config.imageStabilizationMode} focus=${config.focusMode}")
+}
 
 private fun decodeAssetBitmap(context: Context, assetPath: String): Bitmap? =
     runCatching {
