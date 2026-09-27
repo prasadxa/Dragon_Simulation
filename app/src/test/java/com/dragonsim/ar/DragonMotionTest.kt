@@ -6,11 +6,15 @@ import com.dragonsim.ar.ar.ClipSet
 import com.dragonsim.ar.ar.Physics
 import com.dragonsim.ar.ar.DragonMotion
 import com.dragonsim.ar.ar.DragonPose
+import dev.romainguy.kotlin.math.Float3
+import dev.romainguy.kotlin.math.Float4
+import dev.romainguy.kotlin.math.rotation
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.sqrt
 
 class DragonMotionTest {
@@ -128,6 +132,145 @@ class DragonMotionTest {
         assertTrue("peakPitch=$peakPitch", peakPitch <= 10f)
     }
 
+
+    @Test
+    fun `light stick on a small creature still moves it`() {
+        // Half-size creature (0.15 m/s) at 60 fps, stick just past the deadzone: the
+        // first frame's eased velocity is below the rest-snap threshold and used to be
+        // zeroed every frame, so the creature never started moving.
+        var pose = DragonPose()
+        repeat(30) {
+            pose = DragonMotion.step(pose, 0f to -0.3f, dtSeconds = 1f / 60f, speedMps = 0.15f, maxRadius = 5f)
+        }
+        assertTrue("z=${pose.z}", pose.z < -0.005f)
+    }
+
+    @Test
+    fun `seek toward a close target moves on the first frame`() {
+        val input = DragonMotion.seek(0f, 0f, 0.06f, 0.06f, arriveRadius = 0.25f, stopRadius = 0.0375f)
+        val next = DragonMotion.step(DragonPose(), input, dtSeconds = 1f / 60f, speedMps = 0.3f, maxRadius = 5f)
+        assertTrue("x=${next.x} z=${next.z}", next.x > 0f && next.z > 0f)
+    }
+
+    @Test
+    fun `travel speed is capped for zoomed-in creatures`() {
+        // Default 0.25 m creature walks 0.7 body/s; a 5.5x pinch-zoomed one is capped.
+        assertEquals(0.175f, DragonMotion.travelSpeed(0.25f, flying = false), 1e-5f)
+        assertEquals(Config.MAX_WALK_MPS, DragonMotion.travelSpeed(0.25f * 5.5f, flying = false), 1e-5f)
+        assertTrue(DragonMotion.travelSpeed(0.25f * 5.5f, flying = true) <= Config.MAX_WALK_MPS * Config.FLY_SPEED_FACTOR + 1e-5f)
+    }
+
+    // ── Joystick → movement cross-checks ────────────────────────────────────
+
+    /** Camera screen-up projected on the floor for a phone facing yaw [camYawDeg] (0 = -Z). */
+    private fun camUp(camYawDeg: Float): Pair<Float, Float> {
+        val r = Math.toRadians(camYawDeg.toDouble())
+        return Math.sin(r).toFloat() to -Math.cos(r).toFloat()
+    }
+
+    private fun run(stick: Pair<Float, Float>, camYawDeg: Float, seconds: Float, start: DragonPose = DragonPose()): DragonPose {
+        var pose = start
+        val (ux, uz) = camUp(camYawDeg)
+        repeat((seconds * 30).toInt()) {
+            pose = DragonMotion.step(pose, DragonMotion.cameraRelative(stick, ux, uz), 1f / 30f, 0.2f, 5f)
+        }
+        return pose
+    }
+
+    @Test
+    fun `stick up moves away from the camera and right moves right, whichever way the phone faces`() {
+        for (camYaw in listOf(0f, 90f, 180f, -90f, 37f)) {
+            val (fx, fz) = camUp(camYaw)
+            val rx = -fz
+            val rz = fx
+            val up = run(0f to -1f, camYaw, 1f)
+            val right = run(1f to 0f, camYaw, 1f)
+            val upDot = (up.x * fx + up.z * fz) / hypot(up.x, up.z)
+            val rightDot = (right.x * rx + right.z * rz) / hypot(right.x, right.z)
+            assertTrue("cam=$camYaw up went (${up.x},${up.z})", upDot > 0.999f)
+            assertTrue("cam=$camYaw right went (${right.x},${right.z})", rightDot > 0.999f)
+        }
+    }
+
+    @Test
+    fun `creature faces the way it travels in every stick direction`() {
+        for (deg in 0 until 360 step 45) {
+            val r = Math.toRadians(deg.toDouble())
+            val pose = run(Math.sin(r).toFloat() to -Math.cos(r).toFloat(), 20f, 1.5f)
+            val travel = DragonMotion.yawToward(0f, 0f, pose.velX, pose.velZ)
+            assertEquals("stick=$deg°", 0f, DragonMotion.wrapDeg(pose.yawDeg - travel), 1f)
+        }
+    }
+
+    @Test
+    fun `no frame ever moves or turns more than physically possible`() {
+        // Random stick flicks and full reversals — the "teleport" check.
+        val rnd = java.util.Random(7)
+        var pose = DragonPose()
+        val dt = 1f / 30f
+        val speed = 0.2f
+        repeat(900) { i ->
+            val stick = if (i % 40 < 20) (rnd.nextFloat() * 2 - 1) to (rnd.nextFloat() * 2 - 1) else 0f to 0f
+            val next = DragonMotion.step(pose, stick, dt, speed, 5f)
+            val moved = hypot(next.x - pose.x, next.z - pose.z)
+            assertTrue("frame $i moved $moved m", moved <= speed * dt * 1.0001f)
+            // Exponential yaw easing: at most (1 - e^-8dt) of a half-turn per frame (~42° at 30 fps).
+            assertTrue("frame $i turned ${next.yawDeg - pose.yawDeg}", abs(DragonMotion.wrapDeg(next.yawDeg - pose.yawDeg)) <= 43f)
+            pose = next
+        }
+    }
+
+    @Test
+    fun `tap-to-walk arrives and stops without overshooting`() {
+        var pose = DragonPose()
+        var t = 0f
+        while (t < 10f) {
+            val input = DragonMotion.seek(pose.x, pose.z, 0.6f, -0.4f, arriveRadius = 0.25f, stopRadius = 0.0375f)
+            pose = DragonMotion.step(pose, input, 1f / 30f, 0.175f, 5f)
+            t += 1f / 30f
+        }
+        val d = hypot(pose.x - 0.6f, pose.z + 0.4f)
+        assertTrue("stopped $d m from the target", d < 0.06f)
+        assertEquals(0f, hypot(pose.velX, pose.velZ), 1e-6f)
+    }
+
+    // ── Body orientation ────────────────────────────────────────────────────
+
+    private fun forwardOf(yaw: Float, pitch: Float, roll: Float): Float3 {
+        val v = rotation(DragonMotion.bodyRotation(yaw, pitch, roll)) * Float4(0f, 0f, 1f, 0f)
+        return Float3(v.x, v.y, v.z)
+    }
+
+    private fun rightOf(yaw: Float, pitch: Float, roll: Float): Float3 {
+        val v = rotation(DragonMotion.bodyRotation(yaw, pitch, roll)) * Float4(-1f, 0f, 0f, 0f)
+        return Float3(v.x, v.y, v.z)
+    }
+
+    @Test
+    fun `negative pitch dips the nose at any heading`() {
+        for (yaw in listOf(0f, 90f, 180f, -90f)) {
+            val f = forwardOf(yaw, pitch = -10f, roll = 0f)
+            assertTrue("yaw=$yaw fwd=$f", f.y < -0.15f)
+        }
+    }
+
+    @Test
+    fun `roll banks about the body axis at any heading`() {
+        for (yaw in listOf(0f, 90f, 180f, -90f)) {
+            // Banking never tips the nose — the old Euler order turned roll into pitch at ±90°.
+            val f = forwardOf(yaw, pitch = 0f, roll = -20f)
+            assertEquals("yaw=$yaw fwd=$f", 0f, f.y, 1e-4f)
+            // Negative roll lifts the right wing (banking into a left turn).
+            assertTrue("yaw=$yaw right=${rightOf(yaw, 0f, -20f)}", rightOf(yaw, 0f, -20f).y > 0.3f)
+        }
+    }
+
+    @Test
+    fun `yaw follows the step convention`() {
+        val f = forwardOf(90f, 0f, 0f)
+        assertEquals(1f, f.x, 1e-4f)
+        assertEquals(0f, f.z, 1e-4f)
+    }
 
     // ── ClipSet ─────────────────────────────────────────────────────────────
 

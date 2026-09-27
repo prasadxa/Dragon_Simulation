@@ -1,5 +1,8 @@
 package com.dragonsim.ar.ar
 
+import com.dragonsim.ar.Config
+import dev.romainguy.kotlin.math.Float3
+import dev.romainguy.kotlin.math.Quaternion
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.exp
@@ -13,7 +16,7 @@ import kotlin.math.sqrt
  * @param z        metres along anchor +Z
  * @param yawDeg   facing direction in degrees; 0 = +Z, 90 = +X (see [DragonMotion.step])
  * @param pitchDeg nose-down while moving (negative = dips toward travel direction)
- * @param rollDeg  bank while turning (positive = right wing lifts)
+ * @param rollDeg  bank while turning (negative = right wing lifts, i.e. banks into a left turn)
  * @param velX     smoothed X velocity, m/s — carried between frames so the dragon
  * @param velZ     glides in/out instead of popping between still and full speed
  */
@@ -33,18 +36,19 @@ data class DragonPose(
 )
 
 /**
- * Pure motion/animation logic — no Android dependencies, unit-testable on the JVM.
+ * Pure motion/animation logic — no Android dependencies (kotlin-math only),
+ * unit-testable on the JVM.
  */
 object DragonMotion {
 
     /** Joystick magnitudes below this count as "released". */
     const val INPUT_DEADZONE = 0.15f
 
-    /** Yaw easing rate (per second); higher = snappier turns. */
-    private const val YAW_SMOOTH_RATE = 12f
+    /** Yaw easing rate (per second); higher = snappier turns. ~0.4 s for a U-turn. */
+    private const val YAW_SMOOTH_RATE = 8f
 
-    /** Velocity ease rate (per second); ~0.1 s to reach target speed. */
-    private const val ACCEL_RATE = 10f
+    /** Velocity ease rate (per second); ~0.3 s to reach target speed — no instant dashes. */
+    private const val ACCEL_RATE = 8f
 
     /** Roll applied per degree/second of yaw rate — banking into turns. */
     private const val BANK_PER_DEG_S = 0.045f
@@ -67,6 +71,13 @@ object DragonMotion {
         val (x, y) = input
         return sqrt(x * x + y * y) > INPUT_DEADZONE
     }
+
+    /**
+     * Top travel speed (m/s) for a creature [sizeM] big: constant body lengths per
+     * second, capped in absolute terms, faster in flight.
+     */
+    fun travelSpeed(sizeM: Float, flying: Boolean): Float =
+        minOf(sizeM * Config.BODIES_PER_S, Config.MAX_WALK_MPS) * if (flying) Config.FLY_SPEED_FACTOR else 1f
 
     /**
      * Integrate one frame of joystick input into a new pose.
@@ -101,8 +112,15 @@ object DragonMotion {
         val targetVx = if (active) ix * speedMps else 0f
         val targetVz = if (active) iz * speedMps else 0f
         val blend = 1f - exp(-ACCEL_RATE * dtSeconds)
-        var vx = settle(pose.velX + (targetVx - pose.velX) * blend)
-        var vz = settle(pose.velZ + (targetVz - pose.velZ) * blend)
+        var vx = pose.velX + (targetVx - pose.velX) * blend
+        var vz = pose.velZ + (targetVz - pose.velZ) * blend
+        // Snap to rest only while gliding out. Snapping while accelerating zeroed the
+        // first eased step of a light push (or a slow creature) every frame, so it
+        // never started moving; per-axis snapping also skewed shallow diagonals.
+        if (!active && vx * vx + vz * vz < SETTLE_EPS * SETTLE_EPS) {
+            vx = 0f
+            vz = 0f
+        }
 
         var nx = pose.x + vx * dtSeconds
         var nz = pose.z + vz * dtSeconds
@@ -111,8 +129,12 @@ object DragonMotion {
             val k = maxRadius / radius
             nx *= k
             nz *= k
-            vx = settle((nx - pose.x) / dtSeconds)
-            vz = settle((nz - pose.z) / dtSeconds)
+            vx = (nx - pose.x) / dtSeconds
+            vz = (nz - pose.z) / dtSeconds
+            if (vx * vx + vz * vz < SETTLE_EPS * SETTLE_EPS) {
+                vx = 0f
+                vz = 0f
+            }
         }
 
         var yawDeg = pose.yawDeg
@@ -137,6 +159,21 @@ object DragonMotion {
             velX = vx, velZ = vz,
         )
     }
+
+    /**
+     * Body orientation for a [DragonPose]: yaw about world +Y, then pitch and roll
+     * about the creature's *own* axes. SceneView's Euler `Rotation` applies roll
+     * about the parent Z axis, which turned banking into a nose dip whenever the
+     * creature faced ±X — compose explicitly instead.
+     */
+    fun bodyRotation(yawDeg: Float, pitchDeg: Float, rollDeg: Float): Quaternion =
+        Quaternion.fromAxisAngle(AXIS_Y, yawDeg) *
+            Quaternion.fromAxisAngle(AXIS_X, -pitchDeg) *
+            Quaternion.fromAxisAngle(AXIS_Z, rollDeg)
+
+    private val AXIS_X = Float3(1f, 0f, 0f)
+    private val AXIS_Y = Float3(0f, 1f, 0f)
+    private val AXIS_Z = Float3(0f, 0f, 1f)
 
     /** Exponential shortest-arc approach of [targetDeg] from [currentDeg]. */
     private fun approachYaw(currentDeg: Float, targetDeg: Float, dtSeconds: Float): Float {

@@ -324,7 +324,7 @@ fun AppRoot(modifier: Modifier = Modifier) {
                     Box {
                         RoundAction("✨", "Tricks", { actionsOpen = true })
                         DropdownMenu(expanded = actionsOpen, onDismissRequest = { actionsOpen = false }) {
-                            clips!!.actions.forEach { i ->
+                            clips.actions.forEach { i ->
                                 DropdownMenuItem(
                                     text = { Text(prettyClip(sim.clipNames.getOrNull(i) ?: "Clip $i")) },
                                     onClick = {
@@ -374,6 +374,10 @@ fun AppRoot(modifier: Modifier = Modifier) {
                         }
                     })
                 }
+                RoundAction("🏠", "Home", {
+                    sim.goHome()
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                })
                 RoundAction("🔄", "Reset", {
                     if (recording) {
                         recording = false

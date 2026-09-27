@@ -39,7 +39,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 Unit tests (pure JVM, no device needed — motion, physics, clip resolution):
 
 ```bash
-./gradlew testDebugUnitTest    # 23 tests
+./gradlew testDebugUnitTest    # 29 tests
 ./gradlew lintDebug            # lint report → app/build/reports/lint-results-debug.html
 ```
 
@@ -67,7 +67,11 @@ live while the mini-map fills in — a tap on a surface (or Finish/Skip) ends it
 After that, placement is automatic on the first good surface at screen centre
 (`AUTO_PLACE`), or explicit via tap / "Place in front of me". Only
 **horizontal upward-facing planes** accept placement — walls and ceilings are
-rejected with a hint.
+rejected with a hint. If ARCore finds no plane at all (plain white floors often
+never get one), a tap or "Place in front of me" still places the creature at an
+estimated distance (Instant Placement); it snaps onto the real floor as soon as
+one is detected under it. If ARCore stops an anchor (tracking loss), the
+creature is re-anchored at its last pose rather than removed.
 
 Once placed, the creature lives under a `Plane.createAnchor` whose frame is
 gravity-aligned (local +Y = world up): it stays put through `PAUSED` tracking,
@@ -82,7 +86,8 @@ gravity + landing squash) if it walks off an edge. Vertical planes block it.
   menu (every spare clip as a one-shot), behaviour cycle Manual → Follow →
   Wander.
 - **Left column**: photo → `Pictures/DragonAR`, video → `Movies/DragonAR`
-  (share sheet), hide-UI toggle, Google Scene Viewer, Reset.
+  (share sheet), hide-UI toggle, Google Scene Viewer, Home (walks back to where
+  it was first placed — hops if that's on a higher surface), Reset.
 - **Pinch**: resize the creature 0.5–6×. **Settings**: occlusion (depth phones),
   plane overlay, contact shadow, face-camera, debug HUD, rescan/re-place.
 
@@ -106,7 +111,8 @@ All gameplay numbers live in `app/src/main/java/com/dragonsim/ar/Config.kt`:
 | Constant | Default | Meaning |
 |---|---|---|
 | `DRAGON_SCALE_UNITS` | `0.25f` | Creature bbox fitted into this cube (m), before pinch-zoom. |
-| `BODIES_PER_S` | `1.2f` | Walk speed in body lengths/s (×1.6 while flying). |
+| `BODIES_PER_S` / `MAX_WALK_MPS` | `0.7f` / `0.45f` | Walk speed in body lengths/s, capped in m/s (×`FLY_SPEED_FACTOR` 1.3 while flying). |
+| `SAME_LEVEL_M` | `0.08f` | Planes within this height are one floor — taps there walk, never teleport. |
 | `MAX_ROAM_M` | `5f` | Roam radius around the anchor (m). |
 | `MIN_PLACE_M` / `MAX_PLACE_M` | `0.15` / `3` | Valid tap-to-place distances (m). |
 | `SCAN_TARGET_M2` | `1.5f` | Plane area that counts as a complete scan. |

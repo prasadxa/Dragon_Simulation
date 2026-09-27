@@ -93,8 +93,14 @@ class ArCapture(private val context: Context) {
         val out = recording ?: return null
         recording = null
         out.fd.close()
+        // A failed stop (e.g. stopped before the first frame) leaves an unplayable
+        // file — drop it rather than publishing a broken gallery entry.
+        if (!ok) {
+            discard(out.uri)
+            return null
+        }
         publish(out.uri)
-        return if (ok) out.uri else null
+        return out.uri
     }
 
     fun share(uri: Uri, mime: String) {
@@ -120,7 +126,13 @@ class ArCapture(private val context: Context) {
         val name = "dragon_${System.currentTimeMillis()}.jpg"
         val uri = insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, name, "image/jpeg", Environment.DIRECTORY_PICTURES)
             ?: return null
-        context.contentResolver.openOutputStream(uri)?.use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+        val written = runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+        }.getOrNull() == true
+        if (!written) {
+            discard(uri)
+            return null
+        }
         publish(uri)
         return uri
     }
@@ -146,6 +158,13 @@ class ArCapture(private val context: Context) {
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         return context.contentResolver.insert(collection, values)
+    }
+
+    private fun discard(uri: Uri) {
+        runCatching {
+            if (uri.scheme == "file") uri.path?.let { File(it).delete() }
+            else context.contentResolver.delete(uri, null, null)
+        }.onFailure { Log.w(TAG, "could not discard $uri", it) }
     }
 
     private fun publish(uri: Uri) {

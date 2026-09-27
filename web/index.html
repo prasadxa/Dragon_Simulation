@@ -132,14 +132,31 @@ anchorGroup.add(shadowCatcher);
 // ── Creature model + animation ─────────────────────────────────────────────
 const loader = new GLTFLoader();
 let creatureIdx = 0, model = null, mixer = null, clips = {}, trickAction = null;
-let sizeK = 1;
+let sizeK = 1, loadToken = 0;
+
+// Free the old creature's GPU buffers/textures — the dark dragon alone is ~17 MB.
+function disposeModel(root) {
+  mixer?.stopAllAction();
+  mixer?.uncacheRoot(root);
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    o.geometry?.dispose();
+    for (const m of [].concat(o.material ?? [])) {
+      for (const v of Object.values(m)) if (v?.isTexture) v.dispose();
+      m.dispose();
+    }
+  });
+}
 
 function loadCreature(i) {
   creatureIdx = i;
   const c = CREATURES[i];
+  const token = ++loadToken;
   [...$('pick').children].forEach((b, j) => b.classList.toggle('on', j === i));
   loader.load(c.file, gltf => {
-    if (model) creatureRoot.remove(model);
+    // A newer pick superseded this load — drop it instead of letting the slower one win.
+    if (token !== loadToken) { disposeModel(gltf.scene); return; }
+    if (model) { creatureRoot.remove(model); disposeModel(model); }
     model = gltf.scene;
     model.traverse(o => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
     // Normalise: c.height metres tall, feet at y=0, centred on x/z.
@@ -162,6 +179,10 @@ function loadCreature(i) {
     $('trick').classList.toggle('hidden', clips.tricks.length === 0);
     $('jump').classList.toggle('hidden', !!c.hover);
     st.flying = false;
+    $('fly').classList.remove('on');
+  }, undefined, err => {
+    console.error('failed to load', c.file, err);
+    if (token === loadToken) $('hint').textContent = `Could not load ${c.name}`;
   });
 }
 
@@ -234,11 +255,18 @@ async function checkSupport() {
 checkSupport();
 
 $('go').onclick = async () => {
-  const session = await navigator.xr.requestSession('immersive-ar', {
-    requiredFeatures: ['hit-test'],
-    optionalFeatures: ['anchors', 'dom-overlay', 'plane-detection'],
-    domOverlay: { root: $('overlay') },
-  });
+  let session;
+  try {
+    session = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['hit-test'],
+      optionalFeatures: ['anchors', 'dom-overlay', 'plane-detection'],
+      domOverlay: { root: $('overlay') },
+    });
+  } catch (e) {
+    console.error('AR session failed', e);
+    $('why').textContent = `Could not start AR (${e.name || e}). Allow camera access and try again.`;
+    return;
+  }
   renderer.xr.setReferenceSpaceType('local');
   await renderer.xr.setSession(session);
   refSpace = renderer.xr.getReferenceSpace();
@@ -251,18 +279,23 @@ $('go').onclick = async () => {
   loadCreature(creatureIdx);
 };
 
+let placing = false;
 async function placeAt(hit, frame) {
+  if (placing) return;
+  placing = true;
+  // Read the hit pose now: XRHitTestResult is only valid during its frame, and
+  // the await below outlives it.
+  const hitMatrix = Array.from(hit.getPose(refSpace).transform.matrix);
   anchor?.delete?.();
   anchor = null;
   if (hit.createAnchor) {
     try { anchor = await hit.createAnchor(); } catch (e) { console.warn('anchor failed', e); }
   }
-  if (!anchor) {
-    // No anchors support: pin the hit pose in the (world-locked) local space.
-    const pose = hit.getPose(refSpace);
-    anchorGroup.matrix.fromArray(pose.transform.matrix);
-  }
-  Object.assign(st, { x: 0, y: 0, z: 0, vy: 0, ground: 0, target: null });
+  placing = false;
+  // Start at the hit pose — also the fallback without anchors support (world-locked
+  // local space). With an anchor, the next frame refines it from the anchor space.
+  anchorGroup.matrix.fromArray(hitMatrix);
+  Object.assign(st, { x: 0, y: 0, z: 0, vy: 0, ground: 0, target: null, speed: 0 });
   const cam = renderer.xr.getCamera();
   // Turn to face the phone.
   anchorGroup.matrix.decompose(anchorPos, anchorQuat, anchorScl);
@@ -314,6 +347,7 @@ function groundUnder(surfs, x, z, maxY) {
 // ── Frame loop ─────────────────────────────────────────────────────────────
 const clock = new THREE.Clock();
 const fwd = new THREE.Vector3(), right = new THREE.Vector3(), dir = new THREE.Vector3(), invQ = new THREE.Quaternion();
+const moveDir = new THREE.Vector3(0, 0, 1); // last non-zero heading — the glide-out continues along it
 
 renderer.setAnimationLoop((t, frame) => {
   const dt = Math.min(clock.getDelta(), 0.1);
@@ -328,7 +362,7 @@ renderer.setAnimationLoop((t, frame) => {
   } else reticle.visible = false;
 
   const viewerPose = frame.getViewerPose(refSpace);
-  if ((tapRequested || placeRequested) && lastHit && (!anchorGroup.visible || placeRequested) && viewerPose) {
+  if (tapRequested && lastHit && (!anchorGroup.visible || placeRequested) && viewerPose) {
     placeRequested = false; tapRequested = false;
     placeAt(lastHit, frame);
   } else if (tapRequested && anchorGroup.visible && lastHit) {
@@ -378,13 +412,13 @@ function stepCreature(frame, dt) {
     const dx = st.target.x - st.x, dz = st.target.z - st.z, d = Math.hypot(dx, dz);
     if (d < 0.02) st.target = null; else { dir.set(dx, 0, dz); mag = Math.min(1, d / (h * 0.5) + 0.3) * 0.6; }
   }
-  if (dir.lengthSq() > 1e-8) dir.normalize();
+  if (dir.lengthSq() > 1e-8) moveDir.copy(dir).normalize();
 
   const speed = mag < 0.08 ? 0 : THREE.MathUtils.lerp(WALK_BODIES_PER_S, RUN_BODIES_PER_S, THREE.MathUtils.smoothstep(mag, 0.55, 1)) * h * mag;
   st.speed = THREE.MathUtils.damp(st.speed, speed, 10, dt);
 
   if (st.speed > 1e-4) {
-    const nx = st.x + dir.x * st.speed * dt, nz = st.z + dir.z * st.speed * dt;
+    const nx = st.x + moveDir.x * st.speed * dt, nz = st.z + moveDir.z * st.speed * dt;
     // Stay on detected surfaces: step down off an edge onto a lower one, never through walls.
     const surfs = surfaces(frame);
     const here = groundUnder(surfs, st.x, st.z, st.ground);
@@ -393,7 +427,8 @@ function stepCreature(frame, dt) {
     let ok = inRange && (st.flying || there !== null || here === null);
     if (ok && there !== null && !st.flying) st.ground = there;
     if (ok) { st.x = nx; st.z = nz; }
-    const wantYaw = Math.atan2(dir.x, dir.z);
+    else { st.target = null; st.speed = 0; } // blocked: edge/range — don't walk in place forever
+    const wantYaw = Math.atan2(moveDir.x, moveDir.z);
     let dy = wantYaw - st.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
     st.yaw += dy * Math.min(1, dt * 8);
   }

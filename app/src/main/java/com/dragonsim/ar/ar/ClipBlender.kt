@@ -129,7 +129,11 @@ class ClipBlender(
             fadeT = 0f
             wasFlying = isFlying
         }
-        if (fadeT < 1f) fadeT = (fadeT + dt / MODE_FADE_S).coerceAtMost(1f)
+        if (fadeT < 1f) {
+            fadeT = (fadeT + dt / MODE_FADE_S).coerceAtMost(1f)
+            // Keep the outgoing clip playing through the fade instead of a frozen pose.
+            fadeFromTime = wrap(fadeFromTime + dt, dur(fadeFrom))
+        }
 
         // Hovering without a dedicated fly-idle: slow the fly cycle down.
         val idleRate = if (isFlying && clips.flyIdle == null) 0.6f else 1f

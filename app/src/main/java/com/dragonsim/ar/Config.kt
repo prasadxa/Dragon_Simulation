@@ -49,8 +49,17 @@ object Config {
     /** Walk speed on the image plane, metres/second. */
     const val MOVE_SPEED_MPS = 0.1f
 
-    /** Walking speed in body lengths per second — bigger creatures move faster. */
-    const val BODIES_PER_S = 1.2f
+    /** Walking speed in body lengths per second — bigger creatures move faster… */
+    const val BODIES_PER_S = 0.7f
+
+    /** …up to this absolute cap (m/s), so a pinch-zoomed giant doesn't race across the room. */
+    const val MAX_WALK_MPS = 0.45f
+
+    /** Flying is this much faster than walking. */
+    const val FLY_SPEED_FACTOR = 1.3f
+
+    /** Surfaces within this height of each other count as one floor level (m). */
+    const val SAME_LEVEL_M = 0.08f
 
 
     // ── World physics / behaviour ────────────────────────────────────────────

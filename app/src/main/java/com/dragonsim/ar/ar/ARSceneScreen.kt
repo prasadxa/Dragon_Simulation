@@ -28,7 +28,6 @@ import io.github.sceneview.ar.ARSceneView
 import io.github.sceneview.ar.ARSessionFailure
 import io.github.sceneview.ar.rememberARCameraStream
 import io.github.sceneview.math.Position
-import io.github.sceneview.math.Rotation
 import io.github.sceneview.math.Scale
 import io.github.sceneview.node.ModelNode
 import dev.romainguy.kotlin.math.Float4
@@ -110,11 +109,12 @@ fun ARSceneScreen(
         materialLoader = materialLoader,
         cameraStream = cameraStream,
         sessionCameraConfig = ::preferredCameraConfig,
-        // Placement uses planes only (official SceneView tap-to-place pattern). Depth is
+        // Placement prefers planes (official SceneView tap-to-place pattern); Instant
+        // Placement is the fallback when no plane is found (plain floors). Depth is
         // only switched on for the optional occlusion setting.
         depthMode = if (occlusion) com.google.ar.core.Config.DepthMode.AUTOMATIC
         else com.google.ar.core.Config.DepthMode.DISABLED,
-        instantPlacementMode = com.google.ar.core.Config.InstantPlacementMode.DISABLED,
+        instantPlacementMode = com.google.ar.core.Config.InstantPlacementMode.LOCAL_Y_UP,
         planeRenderer = sim.phase == Phase.Scanning || (showPlanes && !sim.spawned),
         surfaceMirrorer = mirrorer,
         onSessionCreated = { session -> if (BuildConfig.DEBUG) startDebugPlayback(context, session) },
@@ -234,10 +234,15 @@ private fun driveCreature(
     val sq = sim.squash
     val kxz = k * (1f + sq * 0.5f)
     val ky = k * (1f - sq)
-    val rot = Rotation(p.pitchDeg, p.yawDeg + yawOffsetDeg, p.rollDeg)
+    val rot = DragonMotion.bodyRotation(p.yawDeg + yawOffsetDeg, p.pitchDeg, p.rollDeg)
     val off = rotation(rot) * Float4(baseOffset.x * kxz, baseOffset.y * ky, baseOffset.z * kxz, 0f)
-    node.position = Position(p.x + off.x, p.y + Config.DRAGON_Y_OFFSET + off.y, p.z + off.z)
-    node.rotation = rot
+    val glide = sim.renderOffset
+    node.position = Position(
+        p.x + off.x + glide[0],
+        p.y + Config.DRAGON_Y_OFFSET + off.y + glide[1],
+        p.z + off.z + glide[2],
+    )
+    node.quaternion = rot
     node.scale = Scale(baseScale.x * kxz, baseScale.y * ky, baseScale.z * kxz)
 }
 

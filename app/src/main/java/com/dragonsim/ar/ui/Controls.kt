@@ -38,6 +38,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.dragonsim.ar.BuildConfig
 
 private val Glass = Color.Black.copy(alpha = 0.45f)
 
@@ -102,7 +103,8 @@ data class SettingsState(
     val showPlanes: Boolean = true,
     val shadow: Boolean = true,
     val faceCamera: Boolean = false,
-    val debugHud: Boolean = true,
+    /** Developer readout — on by default only in debug builds. */
+    val debugHud: Boolean = BuildConfig.DEBUG,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
